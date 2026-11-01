@@ -9,6 +9,7 @@ import httpx2
 import pytest
 
 from app import graph
+from app.budget import budget_options
 from app.events import hub
 from app.graph import TripSpec, check_spec, parse_answers, resume_trip, start_trip
 
@@ -58,6 +59,16 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
     return calls, spec
 
 
+async def answer_all(run: dict[str, Any]) -> dict[str, Any]:
+    """Answer each question in turn, as the form does, until the trip finishes."""
+    asked = []
+    while run["status"] == "needs_input":
+        asked.append(run["field"])
+        run = await resume_trip(run["thread_id"], {run["field"]: ANSWERS[run["field"]]})
+    run["asked"] = asked
+    return run
+
+
 def full_spec() -> TripSpec:
     return TripSpec(
         destination="Goa",
@@ -88,13 +99,36 @@ async def test_missing_fields_pause_the_graph(fakes: Fakes) -> None:
         "adults",
         "budget_total_inr",
     ]
+    assert run["field"] == "check_in"
+    assert run["remaining"] == 3
+    assert run["budget_options"] == []
     assert calls["search"] == []
+
+
+async def test_fields_are_asked_one_at_a_time_with_budget_last(fakes: Fakes) -> None:
+    run = await answer_all(await start_trip("Goa trip"))
+    assert run["status"] == "done"
+    assert run["asked"] == ["check_in", "check_out", "adults", "budget_total_inr"]
+
+
+async def test_budget_options_use_place_nights_and_adults(fakes: Fakes) -> None:
+    run = await start_trip("Goa trip")
+    while run["field"] != "budget_total_inr":
+        run = await resume_trip(run["thread_id"], {run["field"]: ANSWERS[run["field"]]})
+    assert run["remaining"] == 0
+    assert run["budget_options"] == budget_options("Goa", 3, 2)
+
+
+async def test_answers_for_other_fields_are_ignored(fakes: Fakes) -> None:
+    first = await start_trip("Goa trip")
+    run = await resume_trip(first["thread_id"], ANSWERS)
+    assert run["field"] == "check_out"
+    assert "adults" in run["missing_fields"]
 
 
 async def test_resume_finishes_and_calls_llm_once(fakes: Fakes) -> None:
     calls, _ = fakes
-    first = await start_trip("Goa trip")
-    run = await resume_trip(first["thread_id"], ANSWERS)
+    run = await answer_all(await start_trip("Goa trip"))
     assert run["status"] == "done"
     assert run["destination"] == "Goa"
     assert calls["extract"] == 1
@@ -111,24 +145,18 @@ async def test_searches_run_in_parallel(fakes: Fakes) -> None:
 
 async def test_blank_answers_pause_again_with_message(fakes: Fakes) -> None:
     first = await start_trip("Goa trip")
-    run = await resume_trip(first["thread_id"], {"adults": "2"})
+    run = await resume_trip(first["thread_id"], {"check_in": " "})
     assert run["status"] == "needs_input"
-    assert "adults" not in run["missing_fields"]
-    assert run["error"] == "Please answer every question."
+    assert run["field"] == "check_in"
+    assert run["error"] == "Please answer this question."
 
 
 async def test_invalid_answers_pause_again_with_error(fakes: Fakes) -> None:
     first = await start_trip("Goa trip")
-    run = await resume_trip(
-        first["thread_id"],
-        {
-            **ANSWERS,
-            "check_in": CHECK_OUT.isoformat(),
-            "check_out": CHECK_IN.isoformat(),
-        },
-    )
+    second = await resume_trip(first["thread_id"], {"check_in": CHECK_OUT.isoformat()})
+    run = await resume_trip(second["thread_id"], {"check_out": CHECK_IN.isoformat()})
     assert run["status"] == "needs_input"
-    assert run["missing_fields"] == ["check_out"]
+    assert run["field"] == "check_out"
     assert "after the check-in" in run["error"]
 
 
@@ -166,8 +194,7 @@ async def test_expired_paused_trip_is_forgotten(
 async def test_events_cover_every_step_and_hide_the_query(fakes: Fakes) -> None:
     queue = hub.subscribe()
     try:
-        first = await start_trip(SECRET_QUERY)
-        await resume_trip(first["thread_id"], ANSWERS)
+        await answer_all(await start_trip(SECRET_QUERY))
     finally:
         hub.unsubscribe(queue)
     events = [queue.get_nowait() for _ in range(queue.qsize())]

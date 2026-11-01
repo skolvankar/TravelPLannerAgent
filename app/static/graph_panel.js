@@ -64,7 +64,7 @@ const eventHandlers = {
     highlight(event.node);
     const fields = event.missing_fields.join(", ");
     addStep(`${event.node} paused`, event.error ? `${fields} | ${event.error}` : fields);
-    setStatus(`Paused: waiting for ${fields}`, "paused");
+    setStatus(`Paused: asking for ${event.field}`, "paused");
   },
   run_end() {
     addStep("Run complete");

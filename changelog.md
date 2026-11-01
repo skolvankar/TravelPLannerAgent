@@ -1,5 +1,20 @@
 # Changelog
 
+## Session 2: 2026-11-01
+
+Goal: ask for missing details one at a time, and base the budget options on the trip.
+
+| File | What changed | Why |
+|---|---|---|
+| `app/budget.py` | New. Budget options from the place, nights, and adults, with Indian number format | The budget options were fixed |
+| `app/config.py` | Nightly rates for each place, the default rate, adults per room, and the budget tiers | One place to adjust the rates |
+| `app/graph.py` | `intake` pauses for one field and sends `field`, `remaining`, and `budget_options`. Only the answer for that field is used | One question at a time |
+| `app/ui.py` | The form draws one control, counts the questions left, and takes the budget options as an argument. `BUDGET_OPTIONS` removed | One question at a time |
+| `app/server.py` | Passes the new pause fields to the form | One question at a time |
+| `app/static/graph_panel.js` | The status names the field that is being asked | One question at a time |
+| `tests/test_budget.py` | New | Covers the budget options |
+| `tests/test_graph.py`, `tests/test_ui.py`, `tests/test_server.py`, `tests/test_e2e.py` | Updated for one question at a time | Covers the change |
+
 ## Session 1, part 2: 2026-11-01
 
 Goal: add Tavily, a single MCP config file, a live graph sidebar, and fixes for the 11 review findings.

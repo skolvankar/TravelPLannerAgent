@@ -30,3 +30,31 @@ MAX_PLACE_TEXT_CHARS = 300
 MAX_INTERESTS = 5
 MAX_INTEREST_CHARS = 40
 PAUSED_TRIP_TTL_SECONDS = 3600
+
+# Budget options = nightly room rate x rooms x nights x tier multiplier.
+# Rough mid-range Airbnb rates for one room for two adults. Edit freely.
+DESTINATION_NIGHTLY_INR = {
+    "goa": 4500,
+    "mumbai": 6000,
+    "delhi": 4500,
+    "bengaluru": 4000,
+    "bangalore": 4000,
+    "jaipur": 3500,
+    "udaipur": 4500,
+    "manali": 3000,
+    "shimla": 3000,
+    "rishikesh": 2500,
+    "kerala": 4000,
+    "munnar": 3500,
+    "ooty": 3000,
+    "pondicherry": 3500,
+    "varanasi": 2500,
+}
+DEFAULT_NIGHTLY_INR = 3500
+ADULTS_PER_ROOM = 2
+BUDGET_TIERS = (
+    ("Economy", 0.6),
+    ("Standard", 1.0),
+    ("Comfort", 1.6),
+    ("Luxury", 2.5),
+)

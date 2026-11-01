@@ -23,7 +23,7 @@ Browser page (app/static)
               └─► Tavily MCP over HTTP (remote server)
 ```
 
-- `intake` calls the LLM once. It then loops to itself and pauses with `interrupt()` until no required field is missing.
+- `intake` calls the LLM once. It then loops to itself and pauses with `interrupt()` until no required field is missing. Each pause asks for one field, in the order of `REQUIRED_FIELDS`. The budget comes last, because `app/budget.py` builds its options from the place, the nights, and the adults.
 - `process` uses no LLM. It calls Airbnb and Tavily in parallel.
 - `mcp_client.json` holds all MCP servers. It uses `${NAME}` for secrets, never values. `app/mcp_client.py` expands the names and opens one client for each server. FastMCP does not expand `${NAME}` itself.
 - `app/ui.py` builds Prefab components. The tools return them as JSON in `structuredContent`.
@@ -43,6 +43,8 @@ Browser page (app/static)
 | PRD domain allow list | Not included | Minimal scope. Each result shows its source link |
 | PRD scope | Two nodes only. No Laya, supervisor, Trip Rules, or planner | User-approved minimal scope |
 | Sample data location | `app/fixtures/`, not `data/` or `tests/` | `data/` is protected, and the application reads this file at runtime |
+| Budget options | Four tiers from `nightly rate x ceil(adults / 2) rooms x nights`. The rates are a table in `app/config.py` with a default for other places | The user chose a fixed table over a live Airbnb price check or an LLM estimate. It is fast and testable, but the rates are rough |
+| Missing fields | One question at a time, not one form with every field | The user asked for this |
 | Playwright | The `playwright` package directly, not the `pytest-playwright` plugin | The plugin keeps an event loop open, which breaks the async tests that run after it |
 
 ## Vendored code

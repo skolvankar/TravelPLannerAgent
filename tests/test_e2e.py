@@ -12,6 +12,7 @@ import uvicorn
 from playwright.sync_api import Page, expect, sync_playwright
 
 from app import graph
+from app.budget import budget_options
 from app.graph import TripSpec
 from app.server import HTTP_MIDDLEWARE, mcp
 
@@ -90,22 +91,28 @@ def test_form_flow_and_live_sidebar(page: Page, server_url: str) -> None:
     page.fill("#query", "Beach trip to Goa")
     page.click("#send")
 
-    # The graph pauses, the form appears, and the sidebar shows the pause.
-    expect(page.locator("#graph-status")).to_contain_text("Paused")
+    # The graph pauses and asks for one field. The sidebar names that field.
+    expect(page.locator("#graph-status")).to_contain_text("asking for check_in")
     expect(page.locator('.node.active[id*="flowchart-intake-"]')).to_be_visible()
-    expect(page.locator("#budget_total_inr-25000")).to_be_visible()
-
-    page.fill("#check_in", CHECK_OUT.isoformat())
-    page.fill("#check_out", CHECK_IN.isoformat())
-    page.fill("#adults", "6")
-    page.check("#budget_total_inr-25000")
-    page.click("text=Search stays")
-
-    # An invalid date keeps the valid answers and asks only for that field.
-    expect(page.locator(".error")).to_contain_text("after the check-in")
+    expect(page.locator("#view")).to_contain_text("3 more questions after this.")
     expect(page.locator("#adults")).to_have_count(0)
 
+    page.fill("#check_in", CHECK_OUT.isoformat())
+    page.click("button:has-text('Next')")
+    page.fill("#check_out", CHECK_IN.isoformat())
+    page.click("button:has-text('Next')")
+
+    # An invalid date asks the same question again with the error.
+    expect(page.locator(".error")).to_contain_text("after the check-in")
     page.fill("#check_out", (CHECK_OUT + timedelta(days=2)).isoformat())
+    page.click("button:has-text('Next')")
+
+    page.fill("#adults", "6")
+    page.click("button:has-text('Next')")
+
+    # The budget options follow the place, 2 nights, and 6 adults.
+    standard = budget_options("Goa", 2, 6)[1][0]
+    page.check(f"#budget_total_inr-{standard}")
     page.click("text=Search stays")
 
     # Results and sidebar finish. Hostile listing text stays as plain text.

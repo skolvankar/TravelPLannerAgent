@@ -19,13 +19,6 @@ from prefab_ui.components import (
 
 from app.airbnb import SOURCE_SAMPLE
 
-BUDGET_OPTIONS = [
-    ("10000", "₹10,000"),
-    ("25000", "₹25,000"),
-    ("50000", "₹50,000"),
-    ("100000", "₹1,00,000"),
-]
-
 
 def _radio_field(name: str, title: str, options: list[tuple[str, str]]) -> None:
     Label(title, id=f"{name}-label")
@@ -34,7 +27,7 @@ def _radio_field(name: str, title: str, options: list[tuple[str, str]]) -> None:
             Radio(option=value, label=label, id=f"{name}-{value}")
 
 
-def _draw_field(name: str) -> None:
+def _draw_field(name: str, budget_options: list[tuple[str, str]]) -> None:
     if name == "destination":
         Label("Destination", id="destination-label")
         Input(name="destination", placeholder="Goa", id="destination")
@@ -48,24 +41,28 @@ def _draw_field(name: str) -> None:
         Label("Number of adults", id="adults-label")
         Input(name="adults", input_type="number", placeholder="2", id="adults")
     elif name == "budget_total_inr":
-        _radio_field("budget_total_inr", "Budget for the whole trip", BUDGET_OPTIONS)
+        _radio_field("budget_total_inr", "Budget for the whole stay", budget_options)
 
 
 def build_form(
-    thread_id: str, missing_fields: list[str], error: str | None
+    thread_id: str,
+    field: str,
+    error: str | None,
+    remaining: int = 0,
+    budget_options: list[tuple[str, str]] | None = None,
 ) -> PrefabApp:
-    """Build a form with one control for each missing field."""
-    arguments = {"thread_id": thread_id}
-    arguments.update({name: f"{{{{ {name} }}}}" for name in missing_fields})
-    state = {name: "" for name in missing_fields}
-    with PrefabApp(state=state) as app, Column(gap=3):
-        H3("We need a few more details")
+    """Build a form with one control for the next missing field."""
+    arguments = {"thread_id": thread_id, field: f"{{{{ {field} }}}}"}
+    with PrefabApp(state={field: ""}) as app, Column(gap=3):
+        H3("One more detail")
+        if remaining:
+            plural = "question" if remaining == 1 else "questions"
+            Text(f"{remaining} more {plural} after this.")
         if error:
             Text(error, css_class="error")
-        for name in missing_fields:
-            _draw_field(name)
+        _draw_field(field, budget_options or [])
         Button(
-            "Search stays",
+            "Next" if remaining else "Search stays",
             on_click=CallTool("submit_trip_details", arguments=arguments),
         )
     return app
