@@ -5,6 +5,7 @@ from typing import Any
 from prefab_ui import PrefabApp
 
 from app.airbnb import SOURCE_LIVE, SOURCE_SAMPLE
+from app.budget import BASIS_ESTIMATE, BASIS_LIVE
 from app.config import STATIC_DIR
 from app.ui import build_error, build_form, build_results
 
@@ -36,22 +37,52 @@ def nodes(app: PrefabApp) -> list[dict[str, Any]]:
     return found
 
 
-def test_form_has_controls_only_for_missing_fields() -> None:
+BUDGET_CHOICES = [
+    {"value": "9000", "label": "Budget: ₹9,000"},
+    {"value": "12000", "label": "Comfortable: ₹12,000"},
+    {"value": "18000", "label": "Premium: ₹18,000"},
+]
+
+
+def test_form_asks_only_the_first_missing_field() -> None:
     types = {
         n.get("name"): n["type"]
-        for n in nodes(build_form("t", ["budget_total_inr", "check_in"], None))
+        for n in nodes(
+            build_form("t", ["check_in", "adults", "budget_total_inr"], None)
+        )
     }
-    assert types["budget_total_inr"] == "RadioGroup"
     assert types["check_in"] == "DatePicker"
-    assert "destination" not in types
     assert "adults" not in types
+    assert "budget_total_inr" not in types
 
 
-def test_budget_uses_radio_buttons_and_destination_uses_text() -> None:
-    all_nodes = nodes(build_form("t", ["budget_total_inr", "destination"], None))
+def test_budget_uses_the_priced_choices_as_radio_buttons() -> None:
+    form = build_form("t", ["budget_total_inr"], None, 1, BUDGET_CHOICES, BASIS_LIVE)
+    all_nodes = nodes(form)
     radios = [n["option"] for n in all_nodes if n["type"] == "Radio"]
-    assert radios == ["10000", "25000", "50000", "100000"]
+    assert radios == ["9000", "12000", "18000"]
+    assert "live Airbnb prices" in json.dumps(form.to_json())
+
+
+def test_estimated_budget_choices_are_labelled() -> None:
+    form = build_form(
+        "t", ["budget_total_inr"], None, 1, BUDGET_CHOICES, BASIS_ESTIMATE
+    )
+    assert "ESTIMATE" in json.dumps(form.to_json())
+
+
+def test_destination_uses_text() -> None:
+    all_nodes = nodes(build_form("t", ["destination"], None))
     assert any(n["type"] == "Input" and n["name"] == "destination" for n in all_nodes)
+
+
+def test_button_says_next_until_the_last_question() -> None:
+    def label(remaining: int) -> str:
+        form = build_form("t", ["adults"], None, remaining)
+        return next(n for n in nodes(form) if n["type"] == "Button")["label"]
+
+    assert label(3) == "Next"
+    assert label(1) == "Search stays"
 
 
 def test_adults_uses_a_number_input() -> None:
@@ -103,7 +134,11 @@ def test_views_use_only_components_that_the_page_draws() -> None:
     # drawRadioGroup draws Radio children.
     drawn.add("Radio")
     fields = ["destination", "check_in", "check_out", "adults", "budget_total_inr"]
-    views = (build_form("t", fields, "e"), results(), build_error("C", "d"))
+    forms = [
+        build_form("t", [name], "e", 1, BUDGET_CHOICES, BASIS_ESTIMATE)
+        for name in fields
+    ]
+    views = (*forms, results(), build_error("C", "d"))
     for app in views:
         assert {n["type"] for n in nodes(app)} <= drawn
 

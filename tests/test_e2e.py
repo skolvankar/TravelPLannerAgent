@@ -35,6 +35,10 @@ async def fake_stays(**kwargs: Any) -> dict[str, Any]:
     return {"listings": [listing], "source": "live"}
 
 
+async def fake_prices(**kwargs: Any) -> dict[str, Any]:
+    return {"prices": [3000, 4000, 5000, 6000, 8000]}
+
+
 async def fake_places(destination: str, interests: list[str]) -> dict[str, Any]:
     place = {"title": "Palolem", "url": "https://x.test/place", "summary": "Sand"}
     return {"places": [place], "available": True}
@@ -46,6 +50,7 @@ def server_url() -> Iterator[str]:
     patch.setattr(graph, "extract_trip", fake_extract)
     patch.setattr(graph, "search_stays", fake_stays)
     patch.setattr(graph, "search_places", fake_places)
+    patch.setattr(graph, "fetch_nightly_prices", lambda *args: fake_prices())
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -93,19 +98,32 @@ def test_form_flow_and_live_sidebar(page: Page, server_url: str) -> None:
     # The graph pauses, the form appears, and the sidebar shows the pause.
     expect(page.locator("#graph-status")).to_contain_text("Paused")
     expect(page.locator('.node.active[id*="flowchart-intake-"]')).to_be_visible()
-    expect(page.locator("#budget_total_inr-25000")).to_be_visible()
 
-    page.fill("#check_in", CHECK_OUT.isoformat())
-    page.fill("#check_out", CHECK_IN.isoformat())
-    page.fill("#adults", "6")
-    page.check("#budget_total_inr-25000")
-    page.click("text=Search stays")
-
-    # An invalid date keeps the valid answers and asks only for that field.
-    expect(page.locator(".error")).to_contain_text("after the check-in")
+    # Only one question is on the page at a time.
+    expect(page.locator("#check_in")).to_be_visible()
+    expect(page.locator("#check_out")).to_have_count(0)
     expect(page.locator("#adults")).to_have_count(0)
+    page.fill("#check_in", CHECK_OUT.isoformat())
+    page.click("text=Next")
+
+    # An invalid date asks the same question again with the error.
+    expect(page.locator("#check_out")).to_be_visible()
+    page.fill("#check_out", CHECK_IN.isoformat())
+    page.click("text=Next")
+    expect(page.locator(".error")).to_contain_text("after the check-in")
+    expect(page.locator("#check_out")).to_be_visible()
 
     page.fill("#check_out", (CHECK_OUT + timedelta(days=2)).isoformat())
+    page.click("text=Next")
+    expect(page.locator("#adults")).to_be_visible()
+    page.fill("#adults", "6")
+    page.click("text=Next")
+
+    # The budget choices come from the live prices for these dates and adults.
+    expect(page.locator("#budget_total_inr-label")).to_be_visible()
+    expect(page.locator("#view input[type=radio]")).to_have_count(3)
+    expect(page.locator("#view")).to_contain_text("live Airbnb prices")
+    page.locator("#view input[type=radio]").first.check()
     page.click("text=Search stays")
 
     # Results and sidebar finish. Hostile listing text stays as plain text.
