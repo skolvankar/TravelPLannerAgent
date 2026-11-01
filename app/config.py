@@ -18,8 +18,8 @@ LLM_EFFORT = "medium"
 LLM_MAX_TOKENS = 16000
 
 # mcp_client.json holds the MCP servers. It uses ${NAME} for secrets, never values.
-# The vendored Airbnb server is 0.3.0 with one patch: AIRBNB_BASE_URL replaces the
-# hardcoded airbnb.com, which returns a stub page to Indian IP addresses.
+# npx runs the published Airbnb server. It searches airbnb.com, which returns a
+# stub page to Indian IP addresses, so the search there falls back to sample data.
 MCP_CONFIG_PATH = ROOT / "mcp_client.json"
 MCP_TIMEOUT_SECONDS = 60
 

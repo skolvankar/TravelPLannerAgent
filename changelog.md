@@ -1,5 +1,18 @@
 # Changelog
 
+## Session 2: 2026-11-01
+
+Goal: run the published Airbnb MCP server with `npx` instead of the vendored copy.
+
+| File | What changed | Why |
+|---|---|---|
+| `mcp_client.json` | Airbnb runs `npx -y @openbnb/mcp-server-airbnb --ignore-robots-txt`, with no `env` | The user chose the published server |
+| `vendor/mcp-server-airbnb/` | Removed | Nothing runs the vendored copy now |
+| `.gitignore` | Removed the vendored `node_modules` line | The folder is gone |
+| `app/config.py` | Comment describes the published server and the sample fallback | The vendored patch is gone |
+| `tests/test_mcp_client.py` | The Airbnb test checks the `npx` command and arguments | The old test checked the vendored path |
+| `CLAUDE.md` | Architecture line, new decision row, removed the vendored entry | Context for the next session |
+
 ## Session 1, part 2: 2026-11-01
 
 Goal: add Tavily, a single MCP config file, a live graph sidebar, and fixes for the 11 review findings.

@@ -1,12 +1,12 @@
 {
   "mcpServers": {
     "airbnb": {
-      "command": "node",
+      "command": "npx",
       "args": [
-        "${PROJECT_ROOT}/vendor/mcp-server-airbnb/dist/index.js",
+        "-y",
+        "@openbnb/mcp-server-airbnb",
         "--ignore-robots-txt"
-      ],
-      "env": { "AIRBNB_BASE_URL": "https://www.airbnb.co.in" }
+      ]
     },
     "tavily": {
       "type": "http",
