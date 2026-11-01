@@ -16,7 +16,8 @@ from langgraph.types import Command, interrupt
 from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 
-from app.airbnb import search_stays
+from app.airbnb import fetch_nightly_prices, search_stays
+from app.budget import budget_options
 from app.config import (
     LLM_EFFORT,
     LLM_MAX_TOKENS,
@@ -31,12 +32,15 @@ from app.tavily import search_places
 
 MAX_ADULTS = 16
 MAX_DESTINATION_CHARS = 100
+BUDGET_FIELD = "budget_total_inr"
+# The order is the order of the questions. The budget stays last, because its
+# choices depend on every other answer.
 REQUIRED_FIELDS = (
     "destination",
     "check_in",
     "check_out",
     "adults",
-    "budget_total_inr",
+    BUDGET_FIELD,
 )
 
 EXTRACTION_PROMPT = """You extract trip details from a customer message.
@@ -69,6 +73,8 @@ class TripState(TypedDict, total=False):
     extracted: bool
     missing_fields: list[str]
     field_error: str | None
+    budget_options: list[dict[str, str]]
+    budget_basis: str
     stay_candidates: list[dict[str, Any]]
     stay_source: str
     places: list[dict[str, str]]
@@ -179,28 +185,76 @@ async def intake(state: TripState) -> dict[str, Any]:
         spec = await extract_trip(state["query"])
         fields, missing, error = check_spec(spec, today)
         logger.debug(f"ACTION: intake.extract | missing_fields={missing}")
+        budget = await _plan_budget_step([], fields, missing)
         return {
             **fields,
+            **budget,
             "extracted": True,
             "missing_fields": missing,
             "field_error": error,
         }
 
     # A resume runs this node again from the top, so the LLM call stays in the
-    # first pass and only this pause repeats.
-    answers = interrupt(
-        {"missing_fields": state["missing_fields"], "error": state.get("field_error")}
-    )
+    # first pass and only this pause repeats. The Airbnb price lookup also runs
+    # before the pause that needs it, never inside the repeated part.
+    answers = interrupt(_next_question(state))
     parsed, parse_error = parse_answers(answers)
     current = {name: state.get(name) for name in TripSpec.model_fields}
     fields, missing, error = check_spec(TripSpec(**{**current, **parsed}), today)
     logger.debug(f"ACTION: intake.merge | missing_fields={missing}")
-    blank_error = "Please answer every question." if missing else None
+    blank_error = "Please answer the question." if missing else None
+    budget = await _plan_budget_step(state.get("missing_fields", []), fields, missing)
     return {
         **fields,
+        **budget,
         "missing_fields": missing,
         "field_error": parse_error or error or blank_error,
     }
+
+
+def _next_question(state: TripState) -> dict[str, Any]:
+    """Describe the one question to ask now. Later questions wait their turn."""
+    missing = state["missing_fields"]
+    question: dict[str, Any] = {
+        "missing_fields": missing[:1],
+        "remaining": len(missing),
+        "error": state.get("field_error"),
+    }
+    if missing[:1] == [BUDGET_FIELD]:
+        question["budget_options"] = state.get("budget_options", [])
+        question["budget_basis"] = state.get("budget_basis")
+    return question
+
+
+async def _plan_budget_step(
+    previous_missing: list[str], fields: dict[str, Any], missing: list[str]
+) -> dict[str, Any]:
+    """Price the choices when the budget question is reached, and only then.
+
+    The budget question comes last, so the destination, dates and adults are known.
+    A rejected budget answer asks the same question again with the same choices.
+    """
+    if missing[:1] != [BUDGET_FIELD] or previous_missing[:1] == [BUDGET_FIELD]:
+        return {}
+    nights = (fields["check_out"] - fields["check_in"]).days
+    result = await _traced_call(
+        get_stream_writer(),
+        "airbnb",
+        "airbnb_search",
+        fetch_nightly_prices(
+            fields["destination"],
+            fields["check_in"],
+            fields["check_out"],
+            fields["adults"],
+        ),
+        lambda found: f"{len(found['prices'])} nightly prices",
+    )
+    choices = budget_options(result["prices"], nights, fields["adults"])
+    logger.debug(
+        f"ACTION: intake.budget_options | basis={choices['basis']} "
+        f"| options={len(choices['options'])}"
+    )
+    return {"budget_options": choices["options"], "budget_basis": choices["basis"]}
 
 
 async def _traced_call(

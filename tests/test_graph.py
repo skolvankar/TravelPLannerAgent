@@ -30,7 +30,14 @@ Fakes = tuple[dict[str, Any], dict[str, TripSpec]]
 
 @pytest.fixture
 def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
-    calls: dict[str, Any] = {"extract": 0, "search": [], "places": [], "concurrent": 0}
+    calls: dict[str, Any] = {
+        "extract": 0,
+        "search": [],
+        "places": [],
+        "concurrent": 0,
+        "prices": [],
+        "nightly": [3000, 4000, 5000, 6000, 8000],
+    }
     spec = {"value": TripSpec(destination="Goa", interests=["beach"])}
 
     async def fake_extract(query: str) -> TripSpec:
@@ -52,7 +59,12 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
         calls["concurrent"] -= 1
         return {"places": [PLACE], "available": True}
 
+    async def fake_prices(*args: Any) -> dict[str, Any]:
+        calls["prices"].append(args)
+        return {"prices": calls["nightly"]}
+
     monkeypatch.setattr(graph, "extract_trip", fake_extract)
+    monkeypatch.setattr(graph, "fetch_nightly_prices", fake_prices)
     monkeypatch.setattr(graph, "search_stays", fake_search)
     monkeypatch.setattr(graph, "search_places", fake_places)
     return calls, spec
@@ -82,13 +94,74 @@ async def test_missing_fields_pause_the_graph(fakes: Fakes) -> None:
     calls, _ = fakes
     run = await start_trip("Goa trip")
     assert run["status"] == "needs_input"
-    assert run["missing_fields"] == [
-        "check_in",
-        "check_out",
-        "adults",
-        "budget_total_inr",
-    ]
+    # Only the first question is asked. Three more wait behind it.
+    assert run["missing_fields"] == ["check_in"]
+    assert run["remaining"] == 4
+    assert "budget_options" not in run
     assert calls["search"] == []
+    assert calls["prices"] == []
+
+
+async def test_questions_come_one_at_a_time_and_budget_is_priced_last(
+    fakes: Fakes,
+) -> None:
+    calls, _ = fakes
+    run = await start_trip("Goa trip")
+    for field, answer in (
+        ("check_in", CHECK_IN.isoformat()),
+        ("check_out", (CHECK_IN + timedelta(days=5)).isoformat()),
+        ("adults", "4"),
+    ):
+        assert run["missing_fields"] == [field]
+        assert calls["prices"] == []
+        run = await resume_trip(run["thread_id"], {field: answer})
+    assert run["missing_fields"] == ["budget_total_inr"]
+    assert run["remaining"] == 1
+    assert run["budget_basis"] == "live"
+    # The lookup used the destination, the dates and the adults of this trip.
+    assert calls["prices"] == [("Goa", CHECK_IN, CHECK_IN + timedelta(days=5), 4)]
+    # Median nightly price 5000 for 5 nights.
+    assert [o["value"] for o in run["budget_options"]][1] == "25000"
+    done = await resume_trip(run["thread_id"], {"budget_total_inr": "25000"})
+    assert done["status"] == "done"
+    assert len(calls["prices"]) == 1
+    assert calls["search"][0]["max_price_per_night"] == 5000
+
+
+async def test_rejected_budget_asks_again_without_a_second_lookup(
+    fakes: Fakes,
+) -> None:
+    calls, spec = fakes
+    spec["value"] = TripSpec(
+        destination="Goa", check_in=CHECK_IN, check_out=CHECK_OUT, adults=2
+    )
+    run = await start_trip("Goa trip")
+    assert run["missing_fields"] == ["budget_total_inr"]
+    again = await resume_trip(run["thread_id"], {"budget_total_inr": "0"})
+    assert again["missing_fields"] == ["budget_total_inr"]
+    assert "more than zero" in again["error"]
+    assert again["budget_options"] == run["budget_options"]
+    assert len(calls["prices"]) == 1
+
+
+async def test_budget_is_an_estimate_when_airbnb_gives_no_prices(
+    fakes: Fakes,
+) -> None:
+    calls, spec = fakes
+    calls["nightly"] = []
+    spec["value"] = TripSpec(
+        destination="Goa", check_in=CHECK_IN, check_out=CHECK_OUT, adults=2
+    )
+    run = await start_trip("Goa trip")
+    assert run["budget_basis"] == "estimate"
+    assert run["budget_options"]
+
+
+async def test_a_stated_budget_needs_no_price_lookup(fakes: Fakes) -> None:
+    calls, spec = fakes
+    spec["value"] = full_spec()
+    await start_trip("full query")
+    assert calls["prices"] == []
 
 
 async def test_resume_finishes_and_calls_llm_once(fakes: Fakes) -> None:
@@ -114,7 +187,8 @@ async def test_blank_answers_pause_again_with_message(fakes: Fakes) -> None:
     run = await resume_trip(first["thread_id"], {"adults": "2"})
     assert run["status"] == "needs_input"
     assert "adults" not in run["missing_fields"]
-    assert run["error"] == "Please answer every question."
+    assert run["missing_fields"] == ["check_in"]
+    assert run["error"] == "Please answer the question."
 
 
 async def test_invalid_answers_pause_again_with_error(fakes: Fakes) -> None:

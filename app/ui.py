@@ -18,13 +18,7 @@ from prefab_ui.components import (
 )
 
 from app.airbnb import SOURCE_SAMPLE
-
-BUDGET_OPTIONS = [
-    ("10000", "₹10,000"),
-    ("25000", "₹25,000"),
-    ("50000", "₹50,000"),
-    ("100000", "₹1,00,000"),
-]
+from app.budget import BASIS_ESTIMATE
 
 
 def _radio_field(name: str, title: str, options: list[tuple[str, str]]) -> None:
@@ -34,7 +28,7 @@ def _radio_field(name: str, title: str, options: list[tuple[str, str]]) -> None:
             Radio(option=value, label=label, id=f"{name}-{value}")
 
 
-def _draw_field(name: str) -> None:
+def _draw_field(name: str, budget_options: list[dict[str, str]]) -> None:
     if name == "destination":
         Label("Destination", id="destination-label")
         Input(name="destination", placeholder="Goa", id="destination")
@@ -48,24 +42,45 @@ def _draw_field(name: str) -> None:
         Label("Number of adults", id="adults-label")
         Input(name="adults", input_type="number", placeholder="2", id="adults")
     elif name == "budget_total_inr":
-        _radio_field("budget_total_inr", "Budget for the whole trip", BUDGET_OPTIONS)
+        options = [(o["value"], o["label"]) for o in budget_options]
+        _radio_field("budget_total_inr", "Budget for the whole trip", options)
 
 
 def build_form(
-    thread_id: str, missing_fields: list[str], error: str | None
+    thread_id: str,
+    missing_fields: list[str],
+    error: str | None,
+    remaining: int = 1,
+    budget_options: list[dict[str, str]] | None = None,
+    budget_basis: str | None = None,
 ) -> PrefabApp:
-    """Build a form with one control for each missing field."""
+    """Build a form that asks the first missing field only.
+
+    remaining counts every unanswered field, including this one. The budget choices
+    come from the graph, which priced them for this trip.
+    """
+    asked = missing_fields[:1]
     arguments = {"thread_id": thread_id}
-    arguments.update({name: f"{{{{ {name} }}}}" for name in missing_fields})
-    state = {name: "" for name in missing_fields}
+    arguments.update({name: f"{{{{ {name} }}}}" for name in asked})
+    state = {name: "" for name in asked}
+    last = remaining <= 1
     with PrefabApp(state=state) as app, Column(gap=3):
-        H3("We need a few more details")
+        H3("We need one more detail" if last else "We need a few more details")
         if error:
             Text(error, css_class="error")
-        for name in missing_fields:
-            _draw_field(name)
+        for name in asked:
+            _draw_field(name, budget_options or [])
+        if "budget_total_inr" in asked:
+            if budget_basis == BASIS_ESTIMATE:
+                Text(
+                    "ESTIMATE. Live Airbnb prices were not available, so these "
+                    "amounts are rough figures, not prices for your search.",
+                    css_class="error",
+                )
+            else:
+                Text("Based on live Airbnb prices for your destination and dates.")
         Button(
-            "Search stays",
+            "Search stays" if last else "Next",
             on_click=CallTool("submit_trip_details", arguments=arguments),
         )
     return app
