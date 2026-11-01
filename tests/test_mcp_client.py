@@ -1,5 +1,4 @@
 import json
-from pathlib import Path
 
 import pytest
 from loguru import logger
@@ -36,10 +35,11 @@ def test_missing_variable_names_the_variable(monkeypatch: pytest.MonkeyPatch) ->
         mcp_client.load_server("tavily")
 
 
-def test_load_server_finds_vendored_airbnb_server() -> None:
+def test_load_server_runs_published_airbnb_server_with_npx() -> None:
     server = mcp_client.load_server("airbnb")
-    assert Path(server["args"][0]).is_file()
-    assert server["env"]["AIRBNB_BASE_URL"] == "https://www.airbnb.co.in"
+    assert server["command"] == "npx"
+    assert server["args"] == ["-y", "@openbnb/mcp-server-airbnb", "--ignore-robots-txt"]
+    assert "env" not in server
 
 
 def test_open_client_does_not_log_the_secret(monkeypatch: pytest.MonkeyPatch) -> None:

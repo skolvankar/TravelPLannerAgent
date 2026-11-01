@@ -19,7 +19,7 @@ Browser page (app/static)
   ├─ Main area: fetch POST /mcp, tools/call ─► FastMCP server (app/server.py)
   └─ Sidebar: GET /events (SSE), GET /graph ◄─┘
         └─► LangGraph intake and process (app/graph.py)
-              ├─► Airbnb MCP over stdio (vendored server)
+              ├─► Airbnb MCP over stdio (published server, run with npx)
               └─► Tavily MCP over HTTP (remote server)
 ```
 
@@ -36,6 +36,7 @@ Browser page (app/static)
 |---|---|---|
 | Model | `claude-haiku-5-5` with adaptive thinking and `medium` effort | The user chose this model. It rejects `budget_tokens`, so effort sets the depth and `max_tokens` is the hard limit. The global file says `claude-haiku-4-5`. This file wins on model choice |
 | API-first rule | No FastAPI. MCP tools and three small routes are the only interface | User-approved exception. The goal is to show MCP |
+| Airbnb server | `npx -y @openbnb/mcp-server-airbnb`, not a vendored copy | The user chose the published server. Version 0.3.0 hardcodes `airbnb.com`, which returns an 864-byte stub to Indian IP addresses, so searches from India show sample data. The first run downloads the package |
 | Tavily transport | Remote HTTP with an `Authorization` header | The user chose the remote server. The PRD says `npx`. The header keeps the key out of URLs |
 | Key name | `tavilyApiKey` in `.env` | The user chose this name |
 | Tavily tools | `tavily_search` only | The PRD puts `tavily_extract` behind a human pause, which is out of scope |
@@ -47,7 +48,6 @@ Browser page (app/static)
 
 ## Vendored code
 
-- `vendor/mcp-server-airbnb/` is `@openbnb/mcp-server-airbnb` 0.3.0 with one change on line 137 of `dist/index.js`: `const BASE_URL = process.env.AIRBNB_BASE_URL || "https://www.airbnb.com";`. Reason: `airbnb.com` returns an 873-byte stub to this network (upstream issue #60). `node_modules` is not committed. To restore it, run `npm install --omit=dev --ignore-scripts` in that folder.
 - `app/static/vendor/mermaid.min.js` is Mermaid 11.17.2, so the demo needs no CDN.
 
 ## Known open issues
