@@ -17,6 +17,7 @@ from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 
 from app.airbnb import search_stays
+from app.budget import budget_options, estimate_rates
 from app.config import (
     LLM_EFFORT,
     LLM_MAX_TOKENS,
@@ -31,12 +32,15 @@ from app.tavily import search_places
 
 MAX_ADULTS = 16
 MAX_DESTINATION_CHARS = 100
+BUDGET_FIELD = "budget_total_inr"
+# The form asks for one field at a time, in this order. The budget choices need the
+# other fields, so the budget stays last.
 REQUIRED_FIELDS = (
     "destination",
     "check_in",
     "check_out",
     "adults",
-    "budget_total_inr",
+    BUDGET_FIELD,
 )
 
 EXTRACTION_PROMPT = """You extract trip details from a customer message.
@@ -69,8 +73,11 @@ class TripState(TypedDict, total=False):
     extracted: bool
     missing_fields: list[str]
     field_error: str | None
+    nightly_rates: dict[str, int]
+    rates_destination: str | None
     stay_candidates: list[dict[str, Any]]
     stay_source: str
+    stay_search_url: str
     places: list[dict[str, str]]
     places_available: bool
 
@@ -172,8 +179,27 @@ def parse_answers(answers: dict[str, str | None]) -> tuple[dict[str, Any], str |
     return parsed, first_error
 
 
+async def _rates_if_budget_is_next(
+    state: TripState, fields: dict[str, Any], missing: list[str]
+) -> dict[str, Any]:
+    """Estimate the nightly rates once for each destination, when budget is next."""
+    if not missing or missing[0] != BUDGET_FIELD:
+        return {}
+    if state.get("rates_destination") == fields["destination"]:
+        return {}
+    rates = await estimate_rates(fields["destination"])
+    return {"nightly_rates": rates, "rates_destination": fields["destination"]}
+
+
+def _choices_for(state: TripState, field: str) -> list[dict[str, str]]:
+    if field != BUDGET_FIELD:
+        return []
+    nights = (state["check_out"] - state["check_in"]).days
+    return budget_options(state["nightly_rates"], nights, state["adults"])
+
+
 async def intake(state: TripState) -> dict[str, Any]:
-    """Extract once. On later passes, pause for the missing fields and merge answers."""
+    """Extract once. On later passes, pause for the next missing field and merge it."""
     today = date.today()
     if not state.get("extracted"):
         spec = await extract_trip(state["query"])
@@ -184,22 +210,31 @@ async def intake(state: TripState) -> dict[str, Any]:
             "extracted": True,
             "missing_fields": missing,
             "field_error": error,
+            **await _rates_if_budget_is_next(state, fields, missing),
         }
 
-    # A resume runs this node again from the top, so the LLM call stays in the
-    # first pass and only this pause repeats.
+    # A resume runs this node again from the top, so the LLM calls stay out of this
+    # part and only the pause repeats.
+    field = state["missing_fields"][0]
     answers = interrupt(
-        {"missing_fields": state["missing_fields"], "error": state.get("field_error")}
+        {
+            "field": field,
+            "missing_fields": state["missing_fields"],
+            "error": state.get("field_error"),
+            "budget_options": _choices_for(state, field),
+        }
     )
-    parsed, parse_error = parse_answers(answers)
+    # Only the asked field counts, so the form moves one question at a time.
+    parsed, parse_error = parse_answers({field: answers.get(field)})
     current = {name: state.get(name) for name in TripSpec.model_fields}
     fields, missing, error = check_spec(TripSpec(**{**current, **parsed}), today)
-    logger.debug(f"ACTION: intake.merge | missing_fields={missing}")
-    blank_error = "Please answer every question." if missing else None
+    logger.debug(f"ACTION: intake.merge | field={field} | missing_fields={missing}")
+    blank_error = "Please answer this question." if field in missing else None
     return {
         **fields,
         "missing_fields": missing,
         "field_error": parse_error or error or blank_error,
+        **await _rates_if_budget_is_next(state, fields, missing),
     }
 
 
@@ -267,6 +302,7 @@ async def process(state: TripState) -> dict[str, Any]:
     return {
         "stay_candidates": stays["listings"],
         "stay_source": stays["source"],
+        "stay_search_url": stays["search_url"],
         "places": places["places"],
         "places_available": places["available"],
     }
@@ -335,6 +371,7 @@ async def _stream_run(
                         **base,
                         "kind": "paused",
                         "node": chunk["name"],
+                        "field": pause["field"],
                         "missing_fields": pause["missing_fields"],
                         "error": pause["error"],
                     }

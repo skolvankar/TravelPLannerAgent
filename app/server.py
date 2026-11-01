@@ -43,13 +43,20 @@ HTTP_MIDDLEWARE = [
 
 def _view_for(run: dict[str, Any]) -> PrefabApp:
     if run["status"] == "needs_input":
-        return build_form(run["thread_id"], run["missing_fields"], run["error"])
+        return build_form(
+            run["thread_id"],
+            run["field"],
+            len(run["missing_fields"]) - 1,
+            run["error"],
+            run["budget_options"],
+        )
     return build_results(
         run["destination"],
         run["stay_candidates"],
         run["stay_source"],
         run["places"],
         run["places_available"],
+        run["stay_search_url"],
     )
 
 
