@@ -17,12 +17,14 @@ CHECK_IN = TODAY + timedelta(days=30)
 CHECK_OUT = CHECK_IN + timedelta(days=3)
 LISTING = {"id": "1", "name": "Stay", "url": "https://x.test/1"}
 PLACE = {"title": "Beach", "url": "https://x.test/p", "summary": "Sand"}
+SEARCH_URL = "https://x.test/search"
 ANSWERS = {
     "check_in": CHECK_IN.isoformat(),
     "check_out": CHECK_OUT.isoformat(),
     "adults": "2",
     "budget_total_inr": "25000",
 }
+RATES = {"budget": 1000, "mid_range": 2000, "premium": 4000, "luxury": 8000}
 SECRET_QUERY = "Goa trip, my PAN placeholder is XXXXX"
 
 Fakes = tuple[dict[str, Any], dict[str, TripSpec]]
@@ -30,12 +32,22 @@ Fakes = tuple[dict[str, Any], dict[str, TripSpec]]
 
 @pytest.fixture
 def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
-    calls: dict[str, Any] = {"extract": 0, "search": [], "places": [], "concurrent": 0}
+    calls: dict[str, Any] = {
+        "extract": 0,
+        "rates": [],
+        "search": [],
+        "places": [],
+        "concurrent": 0,
+    }
     spec = {"value": TripSpec(destination="Goa", interests=["beach"])}
 
     async def fake_extract(query: str) -> TripSpec:
         calls["extract"] += 1
         return spec["value"]
+
+    async def fake_rates(destination: str) -> dict[str, int]:
+        calls["rates"].append(destination)
+        return RATES
 
     async def fake_search(**kwargs: Any) -> dict[str, Any]:
         calls["search"].append(kwargs)
@@ -43,7 +55,7 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
         await asyncio.sleep(0)
         calls["overlap"] = calls["concurrent"] == 2
         calls["concurrent"] -= 1
-        return {"listings": [LISTING], "source": "live"}
+        return {"listings": [LISTING], "source": "live", "search_url": SEARCH_URL}
 
     async def fake_places(destination: str, interests: list[str]) -> dict[str, Any]:
         calls["places"].append((destination, interests))
@@ -53,9 +65,24 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
         return {"places": [PLACE], "available": True}
 
     monkeypatch.setattr(graph, "extract_trip", fake_extract)
+    monkeypatch.setattr(graph, "estimate_rates", fake_rates)
     monkeypatch.setattr(graph, "search_stays", fake_search)
     monkeypatch.setattr(graph, "search_places", fake_places)
     return calls, spec
+
+
+async def answer(run: dict[str, Any], value: str | None) -> dict[str, Any]:
+    """Answer the field that the paused trip asks for."""
+    return await resume_trip(run["thread_id"], {run["field"]: value})
+
+
+async def answer_until_done(run: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Answer each question from ANSWERS. Return the end run and the asked fields."""
+    asked: list[str] = []
+    while run["status"] == "needs_input":
+        asked.append(run["field"])
+        run = await answer(run, ANSWERS[run["field"]])
+    return run, asked
 
 
 def full_spec() -> TripSpec:
@@ -76,30 +103,76 @@ async def test_complete_query_does_not_pause(fakes: Fakes) -> None:
     assert run["stay_candidates"] == [LISTING]
     assert run["places"] == [PLACE]
     assert calls["search"][0]["max_price_per_night"] == 10000
+    assert calls["rates"] == []
 
 
-async def test_missing_fields_pause_the_graph(fakes: Fakes) -> None:
+async def test_missing_fields_pause_on_the_first_one(fakes: Fakes) -> None:
     calls, _ = fakes
     run = await start_trip("Goa trip")
     assert run["status"] == "needs_input"
+    assert run["field"] == "check_in"
     assert run["missing_fields"] == [
         "check_in",
         "check_out",
         "adults",
         "budget_total_inr",
     ]
+    assert run["budget_options"] == []
     assert calls["search"] == []
 
 
-async def test_resume_finishes_and_calls_llm_once(fakes: Fakes) -> None:
+async def test_each_answer_asks_the_next_field_and_budget_is_last(
+    fakes: Fakes,
+) -> None:
     calls, _ = fakes
-    first = await start_trip("Goa trip")
-    run = await resume_trip(first["thread_id"], ANSWERS)
+    run, asked = await answer_until_done(await start_trip("Goa trip"))
+    assert asked == ["check_in", "check_out", "adults", "budget_total_inr"]
     assert run["status"] == "done"
     assert run["destination"] == "Goa"
     assert calls["extract"] == 1
+    assert calls["rates"] == ["Goa"]
     assert calls["search"][0]["adults"] == 2
     assert calls["places"] == [("Goa", ["beach"])]
+
+
+async def test_budget_question_offers_choices_from_nights_and_adults(
+    fakes: Fakes,
+) -> None:
+    run = await start_trip("Goa trip")
+    for field in ("check_in", "check_out"):
+        run = await answer(run, ANSWERS[field])
+    run = await answer(run, "5")
+    assert run["field"] == "budget_total_inr"
+    # 5 adults need 3 rooms, for 3 nights.
+    values = [option["value"] for option in run["budget_options"]]
+    assert values == ["9000", "18000", "36000", "72000"]
+
+
+async def test_repeated_budget_question_does_not_ask_llm_again(fakes: Fakes) -> None:
+    calls, _ = fakes
+    run = await start_trip("Goa trip")
+    for field in ("check_in", "check_out", "adults"):
+        run = await answer(run, ANSWERS[field])
+    run = await answer(run, "")
+    assert run["field"] == "budget_total_inr"
+    assert run["budget_options"]
+    assert calls["rates"] == ["Goa"]
+
+
+async def test_stated_budget_needs_no_rates(fakes: Fakes) -> None:
+    calls, spec = fakes
+    spec["value"] = TripSpec(destination="Goa", budget_total_inr=30000)
+    run, asked = await answer_until_done(await start_trip("Goa trip"))
+    assert run["status"] == "done"
+    assert "budget_total_inr" not in asked
+    assert calls["rates"] == []
+
+
+async def test_answer_for_another_field_is_ignored(fakes: Fakes) -> None:
+    first = await start_trip("Goa trip")
+    run = await resume_trip(first["thread_id"], {"adults": "2"})
+    assert run["field"] == "check_in"
+    assert "adults" in run["missing_fields"]
 
 
 async def test_searches_run_in_parallel(fakes: Fakes) -> None:
@@ -109,26 +182,24 @@ async def test_searches_run_in_parallel(fakes: Fakes) -> None:
     assert calls["overlap"] is True
 
 
-async def test_blank_answers_pause_again_with_message(fakes: Fakes) -> None:
-    first = await start_trip("Goa trip")
-    run = await resume_trip(first["thread_id"], {"adults": "2"})
+async def test_blank_answer_asks_the_same_field_again(fakes: Fakes) -> None:
+    run = await answer(await start_trip("Goa trip"), "")
     assert run["status"] == "needs_input"
-    assert "adults" not in run["missing_fields"]
-    assert run["error"] == "Please answer every question."
+    assert run["field"] == "check_in"
+    assert run["error"] == "Please answer this question."
 
 
-async def test_invalid_answers_pause_again_with_error(fakes: Fakes) -> None:
-    first = await start_trip("Goa trip")
-    run = await resume_trip(
-        first["thread_id"],
-        {
-            **ANSWERS,
-            "check_in": CHECK_OUT.isoformat(),
-            "check_out": CHECK_IN.isoformat(),
-        },
-    )
+async def test_valid_answer_moves_on_with_no_error(fakes: Fakes) -> None:
+    run = await answer(await start_trip("Goa trip"), ANSWERS["check_in"])
+    assert run["field"] == "check_out"
+    assert run["error"] is None
+
+
+async def test_invalid_answer_asks_the_same_field_with_error(fakes: Fakes) -> None:
+    run = await answer(await start_trip("Goa trip"), CHECK_OUT.isoformat())
+    run = await answer(run, CHECK_IN.isoformat())
     assert run["status"] == "needs_input"
-    assert run["missing_fields"] == ["check_out"]
+    assert run["field"] == "check_out"
     assert "after the check-in" in run["error"]
 
 
@@ -166,12 +237,17 @@ async def test_expired_paused_trip_is_forgotten(
 async def test_events_cover_every_step_and_hide_the_query(fakes: Fakes) -> None:
     queue = hub.subscribe()
     try:
-        first = await start_trip(SECRET_QUERY)
-        await resume_trip(first["thread_id"], ANSWERS)
+        await answer_until_done(await start_trip(SECRET_QUERY))
     finally:
         hub.unsubscribe(queue)
     events = [queue.get_nowait() for _ in range(queue.qsize())]
     kinds = [event["kind"] for event in events]
+    assert [e["field"] for e in events if e["kind"] == "paused"] == [
+        "check_in",
+        "check_out",
+        "adults",
+        "budget_total_inr",
+    ]
     for kind in (
         "run_start",
         "node_start",

@@ -62,9 +62,9 @@ const eventHandlers = {
   },
   paused(event) {
     highlight(event.node);
-    const fields = event.missing_fields.join(", ");
-    addStep(`${event.node} paused`, event.error ? `${fields} | ${event.error}` : fields);
-    setStatus(`Paused: waiting for ${fields}`, "paused");
+    const asking = `Asking for: ${event.field} (${event.missing_fields.length} left)`;
+    addStep(`${event.node} paused`, event.error ? `${asking} | ${event.error}` : asking);
+    setStatus(`Paused: waiting for ${event.field}`, "paused");
   },
   run_end() {
     addStep("Run complete");

@@ -1,16 +1,42 @@
 """FastMCP client for the Airbnb MCP server, with a labelled sample fallback."""
 
 import json
+import re
 from datetime import date
 from typing import Any
+from urllib.parse import quote, urlencode
 
 from loguru import logger
 
-from app.config import MAX_LISTINGS, SAMPLE_LISTINGS_PATH
+from app.config import (
+    AIRBNB_SEARCH_BASE_URL,
+    MAX_LISTINGS,
+    SAMPLE_DESTINATION,
+    SAMPLE_LISTINGS_PATH,
+)
 from app.mcp_client import MCP_FAILURES, is_https_url, open_client
 
 SOURCE_LIVE = "live"
 SOURCE_SAMPLE = "sample"
+SOURCE_UNAVAILABLE = "unavailable"
+
+
+def search_link(destination: str, check_in: date, check_out: date, adults: int) -> str:
+    """Build an Airbnb search link, so the customer can search the site directly."""
+    query = urlencode(
+        {
+            "checkin": check_in.isoformat(),
+            "checkout": check_out.isoformat(),
+            "adults": adults,
+        }
+    )
+    path = quote(destination, safe="")
+    return f"{AIRBNB_SEARCH_BASE_URL}/s/{path}/homes?{query}"
+
+
+def is_sample_destination(destination: str) -> bool:
+    pattern = rf"\b{re.escape(SAMPLE_DESTINATION)}\b"
+    return re.search(pattern, destination, re.IGNORECASE) is not None
 
 
 def parse_listing(raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -68,6 +94,7 @@ async def search_stays(
         "adults": adults,
         "maxPrice": max_price_per_night,
     }
+    link = search_link(destination, check_in, check_out, adults)
     logger.info(f"MCP airbnb_search | arguments={arguments}")
     try:
         payload = await call_airbnb(arguments)
@@ -76,7 +103,16 @@ async def search_stays(
         listings = parse_search(payload)
     except MCP_FAILURES as e:
         # The demo must continue when the scraper breaks. The UI labels the data.
-        logger.warning(f"FAILED: airbnb_search | reason={e} | using sample data")
-        return {"listings": load_sample(), "source": SOURCE_SAMPLE}
+        # Sample listings from another place would mislead, so they show only for
+        # a trip to the sample destination.
+        if is_sample_destination(destination):
+            logger.warning(f"FAILED: airbnb_search | reason={e} | using sample data")
+            return {
+                "listings": load_sample(),
+                "source": SOURCE_SAMPLE,
+                "search_url": link,
+            }
+        logger.warning(f"FAILED: airbnb_search | reason={e} | no stays to show")
+        return {"listings": [], "source": SOURCE_UNAVAILABLE, "search_url": link}
     logger.success(f"MCP airbnb_search | listings={len(listings)}")
-    return {"listings": listings, "source": SOURCE_LIVE}
+    return {"listings": listings, "source": SOURCE_LIVE, "search_url": link}

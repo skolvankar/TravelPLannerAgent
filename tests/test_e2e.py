@@ -24,6 +24,10 @@ async def fake_extract(query: str) -> TripSpec:
     return TripSpec(destination="Goa", interests=["beach"])
 
 
+async def fake_rates(destination: str) -> dict[str, int]:
+    return {"budget": 1000, "mid_range": 2000, "premium": 4000, "luxury": 8000}
+
+
 async def fake_stays(**kwargs: Any) -> dict[str, Any]:
     listing = {
         "name": HOSTILE_NAME,
@@ -32,7 +36,7 @@ async def fake_stays(**kwargs: Any) -> dict[str, Any]:
         "rating": "5.0",
         "details": "1 bed",
     }
-    return {"listings": [listing], "source": "live"}
+    return {"listings": [listing], "source": "live", "search_url": "https://x.test/s"}
 
 
 async def fake_places(destination: str, interests: list[str]) -> dict[str, Any]:
@@ -44,6 +48,7 @@ async def fake_places(destination: str, interests: list[str]) -> dict[str, Any]:
 def server_url() -> Iterator[str]:
     patch = pytest.MonkeyPatch()
     patch.setattr(graph, "extract_trip", fake_extract)
+    patch.setattr(graph, "estimate_rates", fake_rates)
     patch.setattr(graph, "search_stays", fake_stays)
     patch.setattr(graph, "search_places", fake_places)
     with socket.socket() as probe:
@@ -90,22 +95,31 @@ def test_form_flow_and_live_sidebar(page: Page, server_url: str) -> None:
     page.fill("#query", "Beach trip to Goa")
     page.click("#send")
 
-    # The graph pauses, the form appears, and the sidebar shows the pause.
-    expect(page.locator("#graph-status")).to_contain_text("Paused")
+    # The graph pauses, the form asks one question, and the sidebar shows the pause.
+    expect(page.locator("#graph-status")).to_contain_text(
+        "Paused: waiting for check_in"
+    )
     expect(page.locator('.node.active[id*="flowchart-intake-"]')).to_be_visible()
-    expect(page.locator("#budget_total_inr-25000")).to_be_visible()
+    expect(page.locator("#view")).to_contain_text("3 more questions after this.")
+    expect(page.locator("#check_out")).to_have_count(0)
+    page.fill("#check_in", CHECK_IN.isoformat())
+    page.click("text=Next")
 
-    page.fill("#check_in", CHECK_OUT.isoformat())
+    # An invalid date asks the same question again with the error.
     page.fill("#check_out", CHECK_IN.isoformat())
-    page.fill("#adults", "6")
-    page.check("#budget_total_inr-25000")
-    page.click("text=Search stays")
-
-    # An invalid date keeps the valid answers and asks only for that field.
+    page.click("text=Next")
     expect(page.locator(".error")).to_contain_text("after the check-in")
-    expect(page.locator("#adults")).to_have_count(0)
+    page.fill("#check_out", CHECK_OUT.isoformat())
+    page.click("text=Next")
 
-    page.fill("#check_out", (CHECK_OUT + timedelta(days=2)).isoformat())
+    page.fill("#adults", "6")
+    page.click("text=Next")
+
+    # 6 adults need 3 rooms for 3 nights, so Mid-range is 2,000 x 3 x 3.
+    expect(page.locator("#budget_total_inr-18000")).to_be_attached()
+    expect(page.locator("#view")).to_contain_text("Mid-range · ₹18,000 (3 rooms")
+    expect(page.locator("#adults")).to_have_count(0)
+    page.check("#budget_total_inr-18000")
     page.click("text=Search stays")
 
     # Results and sidebar finish. Hostile listing text stays as plain text.

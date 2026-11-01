@@ -6,4 +6,3 @@ graph_kb/
 __pycache__/
 .pytest_cache/
 .ruff_cache/
-vendor/mcp-server-airbnb/node_modules/
