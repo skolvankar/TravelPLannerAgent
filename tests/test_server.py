@@ -32,7 +32,8 @@ async def test_plan_stay_returns_prefab_form(fake_agent: None) -> None:
     async with Client(mcp) as client:
         tree = await call(client, "plan_stay", {"query": "Goa trip"})
     assert tree["$prefab"]
-    assert "RadioGroup" in str(tree["view"])
+    assert "DatePicker" in str(tree["view"])
+    assert "RadioGroup" not in str(tree["view"])
 
 
 async def test_empty_query_returns_structured_error() -> None:
@@ -70,7 +71,7 @@ async def test_unknown_thread_returns_structured_error() -> None:
         ("/static/style.css", ".radio-group"),
         ("/static/app.js", "callTool"),
         ("/static/graph_panel.js", "EventSource"),
-        ("/graph", "intake -.-> process"),
+        ("/graph", "intake -.-> estimate_budget"),
     ],
 )
 def test_page_files_are_served(path: str, marker: str) -> None:

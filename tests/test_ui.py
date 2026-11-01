@@ -2,11 +2,12 @@ import json
 import re
 from typing import Any
 
+import pytest
 from prefab_ui import PrefabApp
 
 from app.airbnb import SOURCE_LIVE, SOURCE_SAMPLE
 from app.config import STATIC_DIR
-from app.ui import build_error, build_form, build_results
+from app.ui import build_error, build_form, build_results, format_inr
 
 LISTING = {
     "name": "Sea Flat",
@@ -16,6 +17,10 @@ LISTING = {
     "details": "1 bed",
 }
 PLACE = {"title": "Beach", "url": "https://x.test/p", "summary": "Sand"}
+OPTIONS = [
+    {"tier": "Budget", "total_inr": 6000, "per_night_inr": 2000},
+    {"tier": "Mid-range", "total_inr": 120000, "per_night_inr": 40000},
+]
 
 
 def results(source: str = SOURCE_LIVE, destination: str = "Goa") -> PrefabApp:
@@ -36,34 +41,65 @@ def nodes(app: PrefabApp) -> list[dict[str, Any]]:
     return found
 
 
-def test_form_has_controls_only_for_missing_fields() -> None:
-    types = {
-        n.get("name"): n["type"]
-        for n in nodes(build_form("t", ["budget_total_inr", "check_in"], None))
-    }
-    assert types["budget_total_inr"] == "RadioGroup"
-    assert types["check_in"] == "DatePicker"
-    assert "destination" not in types
-    assert "adults" not in types
-
-
-def test_budget_uses_radio_buttons_and_destination_uses_text() -> None:
-    all_nodes = nodes(build_form("t", ["budget_total_inr", "destination"], None))
-    radios = [n["option"] for n in all_nodes if n["type"] == "Radio"]
-    assert radios == ["10000", "25000", "50000", "100000"]
-    assert any(n["type"] == "Input" and n["name"] == "destination" for n in all_nodes)
-
-
-def test_adults_uses_a_number_input() -> None:
-    field = next(
-        n for n in nodes(build_form("t", ["adults"], None)) if n.get("name") == "adults"
+def budget_form(source: str = "live") -> PrefabApp:
+    return build_form(
+        "t",
+        "budget_total_inr",
+        None,
+        answered=3,
+        budget_options=OPTIONS,
+        budget_source=source,
     )
-    assert field["inputType"] == "number"
+
+
+def test_form_has_one_control_for_the_asked_field() -> None:
+    named = [n for n in nodes(build_form("t", "check_in", None)) if n.get("name")]
+    assert [(n["name"], n["type"]) for n in named] == [("check_in", "DatePicker")]
+
+
+def test_form_shows_progress_and_next_until_the_last_question() -> None:
+    app = build_form("t", "check_out", None, answered=1, remaining=3)
+    text = json.dumps(app.to_json())
+    assert "Question 2 of 4" in text
+    button = next(n for n in nodes(app) if n["type"] == "Button")
+    assert button["label"] == "Next"
+    last = next(n for n in nodes(budget_form()) if n["type"] == "Button")
+    assert last["label"] == "Search stays"
+
+
+def test_budget_offers_the_computed_options() -> None:
+    all_nodes = nodes(budget_form())
+    radios = [(n["option"], n["label"]) for n in all_nodes if n["type"] == "Radio"]
+    assert radios == [
+        ("6000", "Budget: ₹6,000 (about ₹2,000 a night)"),
+        ("120000", "Mid-range: ₹1,20,000 (about ₹40,000 a night)"),
+    ]
+    assert "live Airbnb prices" in json.dumps(budget_form().to_json())
+
+
+@pytest.mark.parametrize(
+    ("source", "note"),
+    [("estimate", "Claude estimated"), ("default", "general prices")],
+)
+def test_budget_says_when_prices_are_not_live(source: str, note: str) -> None:
+    text = json.dumps(budget_form(source).to_json())
+    assert "Live Airbnb prices" in text
+    assert "not available" in text
+    assert note in text
+
+
+def test_destination_uses_text_and_adults_uses_a_number_input() -> None:
+    destination = next(
+        n for n in nodes(build_form("t", "destination", None)) if n.get("name")
+    )
+    assert destination["type"] == "Input"
+    adults = next(n for n in nodes(build_form("t", "adults", None)) if n.get("name"))
+    assert adults["inputType"] == "number"
 
 
 def test_button_calls_submit_tool_with_state_templates() -> None:
     button = next(
-        n for n in nodes(build_form("abc", ["adults"], None)) if n["type"] == "Button"
+        n for n in nodes(build_form("abc", "adults", None)) if n["type"] == "Button"
     )
     assert button["onClick"]["action"] == "toolCall"
     assert button["onClick"]["tool"] == "submit_trip_details"
@@ -74,7 +110,14 @@ def test_button_calls_submit_tool_with_state_templates() -> None:
 
 
 def test_form_shows_error() -> None:
-    assert "Bad date" in json.dumps(build_form("t", ["adults"], "Bad date").to_json())
+    assert "Bad date" in json.dumps(build_form("t", "adults", "Bad date").to_json())
+
+
+def test_format_inr_uses_indian_digit_groups() -> None:
+    assert format_inr(500) == "₹500"
+    assert format_inr(25000) == "₹25,000"
+    assert format_inr(100000) == "₹1,00,000"
+    assert format_inr(12345678) == "₹1,23,45,678"
 
 
 def test_live_results_show_stays_and_places() -> None:
@@ -102,8 +145,9 @@ def test_views_use_only_components_that_the_page_draws() -> None:
     drawn = set(re.findall(r"^  (\w+):", block.group(1), re.MULTILINE))
     # drawRadioGroup draws Radio children.
     drawn.add("Radio")
-    fields = ["destination", "check_in", "check_out", "adults", "budget_total_inr"]
-    views = (build_form("t", fields, "e"), results(), build_error("C", "d"))
+    fields = ["destination", "check_in", "check_out", "adults"]
+    forms = [build_form("t", field, "e") for field in fields]
+    views = (*forms, budget_form(), results(), build_error("C", "d"))
     for app in views:
         assert {n["type"] for n in nodes(app)} <= drawn
 

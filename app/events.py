@@ -16,6 +16,9 @@ SAFE_FIELDS = (
     "interests",
     "missing_fields",
     "field_error",
+    "answered",
+    "budget_totals",
+    "budget_source",
     "stay_source",
     "places_available",
 )

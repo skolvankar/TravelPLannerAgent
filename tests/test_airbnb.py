@@ -97,3 +97,53 @@ async def test_changed_page_shape_uses_sample_data(
     monkeypatch.setattr(airbnb, "call_airbnb", fake_call)
     result = await airbnb.search_stays(**SEARCH)
     assert result["source"] == airbnb.SOURCE_SAMPLE
+
+
+def priced(label: Any) -> dict[str, Any]:
+    return {
+        **RAW,
+        "structuredDisplayPrice": {"primaryLine": {"accessibilityLabel": label}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("label", "price"),
+    [
+        ("₹12,000 for 3 nights", 12000),
+        ("₹26,000 for 4 nights, originally ₹34,440", 26000),
+        ("$120 for 3 nights", None),
+        (None, None),
+    ],
+)
+def test_parse_stay_price_reads_the_first_rupee_amount(
+    label: Any, price: int | None
+) -> None:
+    assert airbnb.parse_stay_price(priced(label)) == price
+
+
+async def test_stay_prices_search_with_no_limit_and_sort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: dict[str, Any] = {}
+
+    async def fake_call(arguments: dict[str, Any]) -> dict[str, Any]:
+        sent.update(arguments)
+        labels = ["₹9,000 for 3 nights", "$5 for 3 nights", "₹3,000 for 3 nights"]
+        return {"searchResults": [priced(label) for label in labels]}
+
+    monkeypatch.setattr(airbnb, "call_airbnb", fake_call)
+    search = {k: v for k, v in SEARCH.items() if k != "max_price_per_night"}
+    assert await airbnb.stay_prices(**search) == {"prices": [3000, 9000]}
+    assert "maxPrice" not in sent
+    assert sent["adults"] == 2
+
+
+async def test_stay_prices_failure_returns_no_prices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_call(arguments: dict[str, Any]) -> dict[str, Any]:
+        raise OSError("node not found")
+
+    monkeypatch.setattr(airbnb, "call_airbnb", fake_call)
+    search = {k: v for k, v in SEARCH.items() if k != "max_price_per_night"}
+    assert await airbnb.stay_prices(**search) == {"prices": []}

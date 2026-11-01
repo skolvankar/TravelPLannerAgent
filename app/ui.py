@@ -19,12 +19,34 @@ from prefab_ui.components import (
 
 from app.airbnb import SOURCE_SAMPLE
 
-BUDGET_OPTIONS = [
-    ("10000", "₹10,000"),
-    ("25000", "₹25,000"),
-    ("50000", "₹50,000"),
-    ("100000", "₹1,00,000"),
-]
+BUDGET_NOTES = {
+    "live": "These options come from live Airbnb prices for your destination, "
+    "dates, and group.",
+    "estimate": "Live Airbnb prices are not available. Claude estimated these "
+    "prices for your destination, dates, and group.",
+    "default": "Live Airbnb prices and the price estimate are not available. "
+    "These are general prices for your dates and group.",
+}
+
+
+def format_inr(amount: int) -> str:
+    """Write rupees with Indian digit groups, such as ₹1,00,000."""
+    head, tail = str(amount)[:-3], str(amount)[-3:]
+    groups = []
+    while head:
+        groups.insert(0, head[-2:])
+        head = head[:-2]
+    return "₹" + ",".join([*groups, tail])
+
+
+def _budget_label(option: dict[str, Any]) -> str:
+    total = format_inr(option["total_inr"])
+    per_night = format_inr(option["per_night_inr"])
+    return f"{option['tier']}: {total} (about {per_night} a night)"
+
+
+def _budget_choices(options: list[dict[str, Any]]) -> list[tuple[str, str]]:
+    return [(str(option["total_inr"]), _budget_label(option)) for option in options]
 
 
 def _radio_field(name: str, title: str, options: list[tuple[str, str]]) -> None:
@@ -34,7 +56,7 @@ def _radio_field(name: str, title: str, options: list[tuple[str, str]]) -> None:
             Radio(option=value, label=label, id=f"{name}-{value}")
 
 
-def _draw_field(name: str) -> None:
+def _draw_field(name: str, budget_options: list[dict[str, Any]] | None) -> None:
     if name == "destination":
         Label("Destination", id="destination-label")
         Input(name="destination", placeholder="Goa", id="destination")
@@ -48,24 +70,34 @@ def _draw_field(name: str) -> None:
         Label("Number of adults", id="adults-label")
         Input(name="adults", input_type="number", placeholder="2", id="adults")
     elif name == "budget_total_inr":
-        _radio_field("budget_total_inr", "Budget for the whole trip", BUDGET_OPTIONS)
+        _radio_field(
+            "budget_total_inr",
+            "Budget for the whole trip",
+            _budget_choices(budget_options or []),
+        )
 
 
 def build_form(
-    thread_id: str, missing_fields: list[str], error: str | None
+    thread_id: str,
+    field: str,
+    error: str | None,
+    *,
+    answered: int = 0,
+    remaining: int = 1,
+    budget_options: list[dict[str, Any]] | None = None,
+    budget_source: str | None = None,
 ) -> PrefabApp:
-    """Build a form with one control for each missing field."""
-    arguments = {"thread_id": thread_id}
-    arguments.update({name: f"{{{{ {name} }}}}" for name in missing_fields})
-    state = {name: "" for name in missing_fields}
-    with PrefabApp(state=state) as app, Column(gap=3):
-        H3("We need a few more details")
+    """Build a form that asks for one missing field."""
+    arguments = {"thread_id": thread_id, field: f"{{{{ {field} }}}}"}
+    with PrefabApp(state={field: ""}) as app, Column(gap=3):
+        H3(f"Question {answered + 1} of {answered + remaining}")
         if error:
             Text(error, css_class="error")
-        for name in missing_fields:
-            _draw_field(name)
+        _draw_field(field, budget_options)
+        if budget_source in BUDGET_NOTES:
+            Text(BUDGET_NOTES[budget_source])
         Button(
-            "Search stays",
+            "Next" if remaining > 1 else "Search stays",
             on_click=CallTool("submit_trip_details", arguments=arguments),
         )
     return app

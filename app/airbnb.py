@@ -1,6 +1,7 @@
 """FastMCP client for the Airbnb MCP server, with a labelled sample fallback."""
 
 import json
+import re
 from datetime import date
 from typing import Any
 
@@ -11,6 +12,8 @@ from app.mcp_client import MCP_FAILURES, is_https_url, open_client
 
 SOURCE_LIVE = "live"
 SOURCE_SAMPLE = "sample"
+# The first amount in a label such as "₹26,000 for 4 nights, originally ₹34,440".
+STAY_PRICE = re.compile(r"₹\s?([\d,]+)")
 
 
 def parse_listing(raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -36,6 +39,15 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any] | None:
     }
 
 
+def parse_stay_price(raw: dict[str, Any]) -> int | None:
+    """Return the whole-stay price in rupees, or None for another currency."""
+    label = ((raw.get("structuredDisplayPrice") or {}).get("primaryLine") or {}).get(
+        "accessibilityLabel"
+    )
+    match = STAY_PRICE.search(label or "")
+    return int(match.group(1).replace(",", "")) if match else None
+
+
 def parse_search(payload: dict[str, Any]) -> list[dict[str, Any]]:
     listings = (parse_listing(raw) for raw in payload.get("searchResults") or [])
     return [listing for listing in listings if listing][:MAX_LISTINGS]
@@ -52,6 +64,31 @@ async def call_airbnb(arguments: dict[str, Any]) -> dict[str, Any]:
             "airbnb_search", arguments, raise_on_error=False
         )
     return json.loads(result.content[0].text)
+
+
+async def stay_prices(
+    destination: str, check_in: date, check_out: date, adults: int
+) -> dict[str, Any]:
+    """Search with no price limit. Return the stay prices, lowest first."""
+    arguments = {
+        "location": destination,
+        "checkin": check_in.isoformat(),
+        "checkout": check_out.isoformat(),
+        "adults": adults,
+    }
+    logger.info(f"MCP airbnb_search prices | arguments={arguments}")
+    try:
+        payload = await call_airbnb(arguments)
+        if "error" in payload:
+            raise RuntimeError(payload["error"])
+        prices = [parse_stay_price(raw) for raw in payload.get("searchResults") or []]
+    except MCP_FAILURES as e:
+        # No sample fallback here. The sample prices are for Goa, not this trip.
+        logger.warning(f"FAILED: airbnb_search prices | reason={e}")
+        return {"prices": []}
+    found = sorted(price for price in prices if price)
+    logger.success(f"MCP airbnb_search prices | prices={len(found)}")
+    return {"prices": found}
 
 
 async def search_stays(

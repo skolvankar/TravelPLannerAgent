@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-Minimal teaching slice of the Travel Planner PRD. It shows a FastMCP server, two external MCP servers (Airbnb and Tavily), a two-node LangGraph agent, a form that the server describes with Prefab, and a live view of each graph step.
+Minimal teaching slice of the Travel Planner PRD. It shows a FastMCP server, two external MCP servers (Airbnb and Tavily), a three-node LangGraph agent, a form that the server describes with Prefab, and a live view of each graph step.
 
 ## Run
 
@@ -18,12 +18,13 @@ The Playwright test needs a browser. To install it, run `uv run playwright insta
 Browser page (app/static)
   ├─ Main area: fetch POST /mcp, tools/call ─► FastMCP server (app/server.py)
   └─ Sidebar: GET /events (SSE), GET /graph ◄─┘
-        └─► LangGraph intake and process (app/graph.py)
+        └─► LangGraph intake, estimate_budget, and process (app/graph.py)
               ├─► Airbnb MCP over stdio (vendored server)
               └─► Tavily MCP over HTTP (remote server)
 ```
 
-- `intake` calls the LLM once. It then loops to itself and pauses with `interrupt()` until no required field is missing.
+- `intake` calls the LLM once. It then loops to itself and pauses with `interrupt()` until no required field is missing. Each pause asks for one field, the first missing one in `REQUIRED_FIELDS` order. Budget is last, because its options need the other fields.
+- `estimate_budget` runs once for each set of trip details, just before the budget question. It searches Airbnb for the destination, dates, and adults with no price limit, and reads the whole-stay rupee price from each listing label. The four tiers are the 25th, 50th, 75th, and 100th percentile prices (`BUDGET_PERCENTILES`), rounded up. With fewer than `MIN_PRICED_STAYS` prices, it asks the LLM for the nightly price for one adult in each tier, and each option is that price x adults x nights. If that call fails too, it uses `DEFAULT_NIGHTLY_RATES_INR`. The form says which source it used. It is a separate node, because a resume runs `intake` again from the top, so a call inside `intake` would repeat.
 - `process` uses no LLM. It calls Airbnb and Tavily in parallel.
 - `mcp_client.json` holds all MCP servers. It uses `${NAME}` for secrets, never values. `app/mcp_client.py` expands the names and opens one client for each server. FastMCP does not expand `${NAME}` itself.
 - `app/ui.py` builds Prefab components. The tools return them as JSON in `structuredContent`.
@@ -34,14 +35,16 @@ Browser page (app/static)
 
 | Topic | Decision | Why |
 |---|---|---|
-| Model | `claude-haiku-5-5` with adaptive thinking and `medium` effort | The user chose this model. It rejects `budget_tokens`, so effort sets the depth and `max_tokens` is the hard limit. The global file says `claude-haiku-4-5`. This file wins on model choice |
+| Model | `claude-haiku-5-5` with adaptive thinking. `medium` effort for extraction, `low` for the budget estimate | The user chose this model. It rejects `budget_tokens`, so effort sets the depth and `max_tokens` is the hard limit. The global file says `claude-haiku-4-5`. This file wins on model choice |
 | API-first rule | No FastAPI. MCP tools and three small routes are the only interface | User-approved exception. The goal is to show MCP |
 | Tavily transport | Remote HTTP with an `Authorization` header | The user chose the remote server. The PRD says `npx`. The header keeps the key out of URLs |
 | Key name | `tavilyApiKey` in `.env` | The user chose this name |
 | Tavily tools | `tavily_search` only | The PRD puts `tavily_extract` behind a human pause, which is out of scope |
 | PRD robots rule | `--ignore-robots-txt` is on | The user approved this. The PRD says the flag stays off |
 | PRD domain allow list | Not included | Minimal scope. Each result shows its source link |
-| PRD scope | Two nodes only. No Laya, supervisor, Trip Rules, or planner | User-approved minimal scope |
+| PRD scope | Three nodes only. No Laya, supervisor, Trip Rules, or planner | User-approved minimal scope |
+| Form | One question at a time | The user asked for this |
+| Budget options | Percentiles of live Airbnb stay prices for the trip. LLM estimate, then fixed rates, as fallbacks | The user asked for live Airbnb prices. The sample listings are for Goa, so they cannot price another trip |
 | Sample data location | `app/fixtures/`, not `data/` or `tests/` | `data/` is protected, and the application reads this file at runtime |
 | Playwright | The `playwright` package directly, not the `pytest-playwright` plugin | The plugin keeps an event loop open, which breaks the async tests that run after it |
 
@@ -57,7 +60,8 @@ Browser page (app/static)
 3. The tools and routes have no authentication. The server binds to `127.0.0.1` and rejects other Host names.
 4. The sample listings are from Goa on 2026-11-01. They are not results for the search of the user, and the page says so.
 5. Every open tab receives the events of every trip. This is acceptable for a local single-user demo, but not for a shared server.
-6. Tavily results come from any website. The text is shown as plain text, and no LLM reads it. Adding an LLM step needs a prompt injection review.
+6. Live budget tiers come from one page of Airbnb results (about 18 stays), and the price comes from label text such as "₹10,000 for 4 nights". A label change sends the trip to the LLM estimate, which is a guess, checked only for order and limits. A trip with a missing budget makes two Airbnb searches.
+7. Tavily results come from any website. The text is shown as plain text, and no LLM reads it. Adding an LLM step needs a prompt injection review.
 
 ## Open code review findings (second review, 2026-11-01, not fixed, waiting for user approval)
 

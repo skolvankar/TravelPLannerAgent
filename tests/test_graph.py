@@ -10,7 +10,15 @@ import pytest
 
 from app import graph
 from app.events import hub
-from app.graph import TripSpec, check_spec, parse_answers, resume_trip, start_trip
+from app.graph import (
+    TripSpec,
+    budget_options,
+    check_spec,
+    live_totals,
+    parse_answers,
+    resume_trip,
+    start_trip,
+)
 
 TODAY = date.today()
 CHECK_IN = TODAY + timedelta(days=30)
@@ -23,6 +31,8 @@ ANSWERS = {
     "adults": "2",
     "budget_total_inr": "25000",
 }
+RATES = [1000, 2000, 4000, 8000]
+PRICES = [4000, 6000, 8000, 10000, 12000, 20000, 30000, 50000, 90000]
 SECRET_QUERY = "Goa trip, my PAN placeholder is XXXXX"
 
 Fakes = tuple[dict[str, Any], dict[str, TripSpec]]
@@ -30,12 +40,28 @@ Fakes = tuple[dict[str, Any], dict[str, TripSpec]]
 
 @pytest.fixture
 def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
-    calls: dict[str, Any] = {"extract": 0, "search": [], "places": [], "concurrent": 0}
+    calls: dict[str, Any] = {
+        "extract": 0,
+        "estimate": [],
+        "prices": [],
+        "price_list": PRICES,
+        "search": [],
+        "places": [],
+        "concurrent": 0,
+    }
     spec = {"value": TripSpec(destination="Goa", interests=["beach"])}
 
     async def fake_extract(query: str) -> TripSpec:
         calls["extract"] += 1
         return spec["value"]
+
+    async def fake_estimate(destination: str) -> list[int]:
+        calls["estimate"].append(destination)
+        return RATES
+
+    async def fake_prices(**kwargs: Any) -> dict[str, Any]:
+        calls["prices"].append(kwargs)
+        return {"prices": calls["price_list"]}
 
     async def fake_search(**kwargs: Any) -> dict[str, Any]:
         calls["search"].append(kwargs)
@@ -53,9 +79,21 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
         return {"places": [PLACE], "available": True}
 
     monkeypatch.setattr(graph, "extract_trip", fake_extract)
+    monkeypatch.setattr(graph, "estimate_rates", fake_estimate)
+    monkeypatch.setattr(graph, "stay_prices", fake_prices)
     monkeypatch.setattr(graph, "search_stays", fake_search)
     monkeypatch.setattr(graph, "search_places", fake_places)
     return calls, spec
+
+
+async def answer_all(run: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+    """Answer each question in turn. Return the last run and the fields asked."""
+    asked = []
+    while run["status"] == "needs_input":
+        asked.append(run["field"])
+        answer = {run["field"]: ANSWERS[run["field"]]}
+        run = await resume_trip(run["thread_id"], answer)
+    return run, asked
 
 
 def full_spec() -> TripSpec:
@@ -76,12 +114,16 @@ async def test_complete_query_does_not_pause(fakes: Fakes) -> None:
     assert run["stay_candidates"] == [LISTING]
     assert run["places"] == [PLACE]
     assert calls["search"][0]["max_price_per_night"] == 10000
+    assert calls["estimate"] == []
+    assert calls["prices"] == []
 
 
 async def test_missing_fields_pause_the_graph(fakes: Fakes) -> None:
     calls, _ = fakes
     run = await start_trip("Goa trip")
     assert run["status"] == "needs_input"
+    assert run["field"] == "check_in"
+    assert run["answered"] == 0
     assert run["missing_fields"] == [
         "check_in",
         "check_out",
@@ -91,13 +133,27 @@ async def test_missing_fields_pause_the_graph(fakes: Fakes) -> None:
     assert calls["search"] == []
 
 
+async def test_questions_come_one_at_a_time_in_order(fakes: Fakes) -> None:
+    _, asked = await answer_all(await start_trip("Goa trip"))
+    assert asked == ["check_in", "check_out", "adults", "budget_total_inr"]
+
+
+async def test_each_answer_moves_to_the_next_question(fakes: Fakes) -> None:
+    first = await start_trip("Goa trip")
+    run = await resume_trip(first["thread_id"], {"check_in": ANSWERS["check_in"]})
+    assert run["field"] == "check_out"
+    assert run["answered"] == 1
+    assert run["error"] is None
+
+
 async def test_resume_finishes_and_calls_llm_once(fakes: Fakes) -> None:
     calls, _ = fakes
-    first = await start_trip("Goa trip")
-    run = await resume_trip(first["thread_id"], ANSWERS)
+    run, _ = await answer_all(await start_trip("Goa trip"))
     assert run["status"] == "done"
     assert run["destination"] == "Goa"
     assert calls["extract"] == 1
+    assert len(calls["prices"]) == 1
+    assert calls["estimate"] == []
     assert calls["search"][0]["adults"] == 2
     assert calls["places"] == [("Goa", ["beach"])]
 
@@ -109,27 +165,104 @@ async def test_searches_run_in_parallel(fakes: Fakes) -> None:
     assert calls["overlap"] is True
 
 
-async def test_blank_answers_pause_again_with_message(fakes: Fakes) -> None:
+async def test_blank_answer_asks_the_same_question_again(fakes: Fakes) -> None:
     first = await start_trip("Goa trip")
-    run = await resume_trip(first["thread_id"], {"adults": "2"})
+    run = await resume_trip(first["thread_id"], {"check_in": ""})
     assert run["status"] == "needs_input"
-    assert "adults" not in run["missing_fields"]
-    assert run["error"] == "Please answer every question."
+    assert run["field"] == "check_in"
+    assert run["error"] == "Please answer this question."
 
 
-async def test_invalid_answers_pause_again_with_error(fakes: Fakes) -> None:
+async def test_invalid_answer_asks_the_same_question_again(fakes: Fakes) -> None:
     first = await start_trip("Goa trip")
-    run = await resume_trip(
-        first["thread_id"],
-        {
-            **ANSWERS,
-            "check_in": CHECK_OUT.isoformat(),
-            "check_out": CHECK_IN.isoformat(),
-        },
-    )
+    run = await resume_trip(first["thread_id"], {"check_in": CHECK_IN.isoformat()})
+    run = await resume_trip(run["thread_id"], {"check_out": CHECK_IN.isoformat()})
     assert run["status"] == "needs_input"
-    assert run["missing_fields"] == ["check_out"]
+    assert run["field"] == "check_out"
+    assert run["answered"] == 1
     assert "after the check-in" in run["error"]
+
+
+def budget_spec() -> TripSpec:
+    return TripSpec(destination="Goa", check_in=CHECK_IN, check_out=CHECK_OUT, adults=2)
+
+
+async def test_budget_question_offers_live_airbnb_prices(fakes: Fakes) -> None:
+    calls, spec = fakes
+    spec["value"] = budget_spec()
+    run = await start_trip("Goa trip")
+    assert run["field"] == "budget_total_inr"
+    assert [o["total_inr"] for o in run["budget_options"]] == [
+        8000,
+        12000,
+        30000,
+        90000,
+    ]
+    assert run["budget_source"] == "live"
+    assert calls["prices"] == [
+        {
+            "destination": "Goa",
+            "check_in": CHECK_IN,
+            "check_out": CHECK_OUT,
+            "adults": 2,
+        }
+    ]
+    run = await resume_trip(run["thread_id"], {"budget_total_inr": ""})
+    assert run["field"] == "budget_total_inr"
+    assert len(calls["prices"]) == 1
+    assert calls["estimate"] == []
+
+
+async def test_too_few_live_prices_use_the_claude_estimate(fakes: Fakes) -> None:
+    calls, spec = fakes
+    calls["price_list"] = [5000, 7000]
+    spec["value"] = budget_spec()
+    run = await start_trip("Goa trip")
+    assert run["budget_source"] == "estimate"
+    assert [o["total_inr"] for o in run["budget_options"]] == [
+        6000,
+        12000,
+        24000,
+        48000,
+    ]
+    assert calls["estimate"] == ["Goa"]
+
+
+async def test_failed_estimate_uses_default_rates(
+    fakes: Fakes, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    calls, spec = fakes
+    calls["price_list"] = []
+
+    async def fail(destination: str) -> list[int]:
+        raise graph.ExtractionError("no answer")
+
+    monkeypatch.setattr(graph, "estimate_rates", fail)
+    spec["value"] = TripSpec(
+        destination="Goa", check_in=CHECK_IN, check_out=CHECK_OUT, adults=1
+    )
+    run = await start_trip("Goa trip")
+    assert run["budget_source"] == "default"
+    assert run["budget_options"][0]["total_inr"] == (
+        graph.DEFAULT_NIGHTLY_RATES_INR[0] * 3
+    )
+
+
+def test_live_totals_pick_points_in_the_price_spread() -> None:
+    assert live_totals(PRICES) == [8000, 12000, 30000, 90000]
+    assert live_totals([5000] * 4) == [5000] * 4
+
+
+def test_budget_options_add_the_nightly_share() -> None:
+    options = budget_options([6000, 12000, 24000, 48000], 3)
+    assert [o["total_inr"] for o in options] == [6000, 12000, 24000, 48000]
+    assert options[0]["per_night_inr"] == 2000
+
+
+def test_budget_options_round_up_and_drop_merged_tiers() -> None:
+    options = budget_options([1010, 1020, 1030, 12340], 1)
+    assert [o["total_inr"] for o in options] == [1500, 13000]
+    assert [o["tier"] for o in options] == ["Budget", "Luxury"]
 
 
 async def test_unknown_thread_is_rejected(fakes: Fakes) -> None:
@@ -166,8 +299,7 @@ async def test_expired_paused_trip_is_forgotten(
 async def test_events_cover_every_step_and_hide_the_query(fakes: Fakes) -> None:
     queue = hub.subscribe()
     try:
-        first = await start_trip(SECRET_QUERY)
-        await resume_trip(first["thread_id"], ANSWERS)
+        await answer_all(await start_trip(SECRET_QUERY))
     finally:
         hub.unsubscribe(queue)
     events = [queue.get_nowait() for _ in range(queue.qsize())]
@@ -318,3 +450,40 @@ async def test_extract_reports_bad_key(monkeypatch: pytest.MonkeyPatch) -> None:
     _fake_client(monkeypatch, lambda r: httpx2.Response(401, json=body))
     with pytest.raises(graph.ExtractionError, match="API key"):
         await graph.extract_trip("Goa trip")
+
+
+def _rates_message(**rates: int) -> dict[str, Any]:
+    return _message(json.dumps(rates))
+
+
+async def test_estimate_sends_destination_with_low_effort(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: dict[str, Any] = {}
+    reply = _rates_message(budget=1000, mid_range=2000, premium=4000, luxury=8000)
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        sent.update(json.loads(request.content))
+        return httpx2.Response(200, json=reply)
+
+    _fake_client(monkeypatch, handler)
+    assert await graph.estimate_rates("Goa") == RATES
+    assert sent["output_config"]["effort"] == "low"
+    assert sent["messages"] == [{"role": "user", "content": "Goa"}]
+
+
+@pytest.mark.parametrize(
+    "rates",
+    [
+        {"budget": 3000, "mid_range": 2000, "premium": 4000, "luxury": 8000},
+        {"budget": 0, "mid_range": 2000, "premium": 4000, "luxury": 8000},
+        {"budget": 1000, "mid_range": 2000, "premium": 4000, "luxury": 900000},
+    ],
+)
+async def test_estimate_rejects_unusable_prices(
+    monkeypatch: pytest.MonkeyPatch, rates: dict[str, int]
+) -> None:
+    body = _rates_message(**rates)
+    _fake_client(monkeypatch, lambda r: httpx2.Response(200, json=body))
+    with pytest.raises(graph.ExtractionError):
+        await graph.estimate_rates("Goa")

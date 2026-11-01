@@ -1,5 +1,21 @@
 # Changelog
 
+## Session 2: 2026-11-01
+
+Goal: ask for one missing field at a time, and base the budget options on live Airbnb prices for the destination, the dates, and the adults.
+
+| File | What changed | Why |
+|---|---|---|
+| `app/graph.py` | Each pause asks for the first missing field. New `estimate_budget` node: live price percentiles, then a Claude estimate, then default rates. One shared Claude call helper | One question at a time. Budget options that fit the trip |
+| `app/airbnb.py` | New `stay_prices` and `parse_stay_price`: a search with no price limit that returns the whole-stay prices | Live prices for the budget options |
+| `app/config.py` | Budget tiers, percentiles, minimum priced stays, default nightly rates, rate limit, and estimate effort | One place to change the budget settings |
+| `app/ui.py` | The form draws one field, the progress, the computed budget options with Indian digit groups, and a note on the price source | One question at a time. No fixed budget amounts |
+| `app/server.py` | Passes the single field and the budget options to the form | New pause data |
+| `app/events.py` | Allows `answered`, `budget_totals`, and `budget_source` | Sidebar shows the estimate |
+| `app/static/graph_panel.js` | The pause step names the asked field | One question at a time |
+| `tests/test_graph.py`, `tests/test_airbnb.py`, `tests/test_ui.py`, `tests/test_server.py`, `tests/test_e2e.py` | Cases for the question order, repeated questions, price parsing, live tiers, both fallbacks, and estimate checks | Covers the changes |
+| `CLAUDE.md` | Updated the architecture, decisions, and open issues | Context for the next session |
+
 ## Session 1, part 2: 2026-11-01
 
 Goal: add Tavily, a single MCP config file, a live graph sidebar, and fixes for the 11 review findings.
