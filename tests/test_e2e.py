@@ -35,6 +35,10 @@ async def fake_stays(**kwargs: Any) -> dict[str, Any]:
     return {"listings": [listing], "source": "live"}
 
 
+async def fake_prices(*args: Any) -> dict[str, list[int]]:
+    return {"totals": [10000, 20000, 30000, 40000, 50000]}
+
+
 async def fake_places(destination: str, interests: list[str]) -> dict[str, Any]:
     place = {"title": "Palolem", "url": "https://x.test/place", "summary": "Sand"}
     return {"places": [place], "available": True}
@@ -46,6 +50,7 @@ def server_url() -> Iterator[str]:
     patch.setattr(graph, "extract_trip", fake_extract)
     patch.setattr(graph, "search_stays", fake_stays)
     patch.setattr(graph, "search_places", fake_places)
+    patch.setattr(graph, "fetch_stay_totals", fake_prices)
     with socket.socket() as probe:
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
@@ -90,22 +95,37 @@ def test_form_flow_and_live_sidebar(page: Page, server_url: str) -> None:
     page.fill("#query", "Beach trip to Goa")
     page.click("#send")
 
-    # The graph pauses, the form appears, and the sidebar shows the pause.
-    expect(page.locator("#graph-status")).to_contain_text("Paused")
+    # The graph pauses, the form asks one field, and the sidebar names that field.
+    expect(page.locator("#graph-status")).to_have_text("Paused: asking for check_in")
     expect(page.locator('.node.active[id*="flowchart-intake-"]')).to_be_visible()
-    expect(page.locator("#budget_total_inr-25000")).to_be_visible()
-
-    page.fill("#check_in", CHECK_OUT.isoformat())
-    page.fill("#check_out", CHECK_IN.isoformat())
-    page.fill("#adults", "6")
-    page.check("#budget_total_inr-25000")
-    page.click("text=Search stays")
-
-    # An invalid date keeps the valid answers and asks only for that field.
-    expect(page.locator(".error")).to_contain_text("after the check-in")
+    expect(page.locator("#check_in")).to_be_visible()
+    expect(page.locator("#check_out")).to_have_count(0)
     expect(page.locator("#adults")).to_have_count(0)
 
+    page.fill("#check_in", CHECK_OUT.isoformat())
+    page.click("text=Next")
+    expect(page.locator("#check_in")).to_have_count(0)
+    page.fill("#check_out", CHECK_IN.isoformat())
+    page.click("text=Next")
+
+    # An invalid date asks the same field again.
+    expect(page.locator(".error")).to_contain_text("after the check-in")
+    expect(page.locator("#check_out")).to_be_visible()
+
     page.fill("#check_out", (CHECK_OUT + timedelta(days=2)).isoformat())
+    page.click("text=Next")
+    page.fill("#adults", "6")
+    page.click("text=Next")
+
+    # The budget is last, and its options come from the live prices.
+    expect(page.locator("#graph-status")).to_have_text(
+        "Paused: asking for budget_total_inr"
+    )
+    expect(page.locator("#view")).to_contain_text("Mid-range: ₹30,000")
+    expect(page.locator("#graph-steps")).to_contain_text(
+        "5 prices for the budget options"
+    )
+    page.check("#budget_total_inr-30000")
     page.click("text=Search stays")
 
     # Results and sidebar finish. Hostile listing text stays as plain text.

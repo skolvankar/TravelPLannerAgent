@@ -1,5 +1,22 @@
 # Changelog
 
+## Session 1, part 3: 2026-11-01
+
+Goal: ask one missing field at a time, and build the budget options from stay duration, adults, and location.
+
+| File | What changed | Why |
+|---|---|---|
+| `app/budget.py` | New. Percentile options, the estimate formula, and rupee formatting | Budget options are not static now |
+| `app/config.py` | Added the budget tiers, minimum prices, rounding, and adults for each room | One place to change the options |
+| `app/airbnb.py` | Added `parse_stay_total` and `fetch_stay_totals` | Reads live totals, with no sample fallback |
+| `app/graph.py` | Each pause asks one field, ignores other answers, builds the options once, and rejects a budget that was not offered. An error now belongs to the field that the page asks next | The core of both features |
+| `app/ui.py` | The form draws one field, with "Next" until the last question. Removed `BUDGET_OPTIONS` and added the estimate note | One question at a time |
+| `app/server.py` | Passes the budget options to the form | Dynamic options |
+| `app/static/graph_panel.js` | The sidebar shows the asked field and the number left | The sidebar matches the new flow |
+| `tests/test_budget.py` | New | Covers the option calculation |
+| `tests/test_airbnb.py`, `tests/test_graph.py`, `tests/test_ui.py`, `tests/test_server.py`, `tests/test_e2e.py` | Updated for one question at a time, and added price and budget cases | Covers the changes |
+| `CLAUDE.md` | Updated the architecture, decisions, and open issues, and recorded the 8 unfixed findings of the third review | Context for the next session |
+
 ## Session 1, part 2: 2026-11-01
 
 Goal: add Tavily, a single MCP config file, a live graph sidebar, and fixes for the 11 review findings.

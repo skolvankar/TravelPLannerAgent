@@ -1,6 +1,7 @@
 """FastMCP client for the Airbnb MCP server, with a labelled sample fallback."""
 
 import json
+import re
 from datetime import date
 from typing import Any
 
@@ -11,6 +12,23 @@ from app.mcp_client import MCP_FAILURES, is_https_url, open_client
 
 SOURCE_LIVE = "live"
 SOURCE_SAMPLE = "sample"
+# The first amount is the price to pay. A discount label adds "originally" after it.
+STAY_TOTAL = re.compile(r"₹\s*([\d,]+)\s+for\s+\d+\s+nights?")
+
+
+def _price_label(raw: dict[str, Any]) -> Any:
+    return ((raw.get("structuredDisplayPrice") or {}).get("primaryLine") or {}).get(
+        "accessibilityLabel"
+    )
+
+
+def parse_stay_total(raw: dict[str, Any]) -> int | None:
+    """Return the rupee total of one listing for the whole stay, if the label has one."""
+    label = _price_label(raw)
+    match = STAY_TOTAL.search(label) if isinstance(label, str) else None
+    if match is None:
+        return None
+    return int(match.group(1).replace(",", "")) or None
 
 
 def parse_listing(raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -23,9 +41,7 @@ def parse_listing(raw: dict[str, Any]) -> dict[str, Any] | None:
     name = (description.get("name") or {}).get(
         "localizedStringWithTranslationPreference"
     )
-    price = ((raw.get("structuredDisplayPrice") or {}).get("primaryLine") or {}).get(
-        "accessibilityLabel"
-    )
+    price = _price_label(raw)
     return {
         "id": raw.get("id"),
         "name": name or "Airbnb listing",
@@ -80,3 +96,28 @@ async def search_stays(
         return {"listings": load_sample(), "source": SOURCE_SAMPLE}
     logger.success(f"MCP airbnb_search | listings={len(listings)}")
     return {"listings": listings, "source": SOURCE_LIVE}
+
+
+async def fetch_stay_totals(
+    destination: str, check_in: date, check_out: date, adults: int
+) -> dict[str, list[int]]:
+    """Read stay totals with no price limit. A failure returns none, never sample data."""
+    arguments = {
+        "location": destination,
+        "checkin": check_in.isoformat(),
+        "checkout": check_out.isoformat(),
+        "adults": adults,
+    }
+    logger.info(f"MCP airbnb_search for prices | arguments={arguments}")
+    try:
+        payload = await call_airbnb(arguments)
+        if "error" in payload:
+            raise RuntimeError(payload["error"])
+        found = (parse_stay_total(raw) for raw in payload.get("searchResults") or [])
+        totals = [total for total in found if total]
+    except MCP_FAILURES as e:
+        # The sample prices are from Goa, so they cannot price another destination.
+        logger.warning(f"FAILED: airbnb_search for prices | reason={e}")
+        return {"totals": []}
+    logger.success(f"MCP airbnb_search for prices | totals={len(totals)}")
+    return {"totals": totals}

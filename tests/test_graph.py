@@ -21,8 +21,8 @@ ANSWERS = {
     "check_in": CHECK_IN.isoformat(),
     "check_out": CHECK_OUT.isoformat(),
     "adults": "2",
-    "budget_total_inr": "25000",
 }
+TOTALS = [10000, 20000, 30000, 40000, 50000]
 SECRET_QUERY = "Goa trip, my PAN placeholder is XXXXX"
 
 Fakes = tuple[dict[str, Any], dict[str, TripSpec]]
@@ -30,12 +30,23 @@ Fakes = tuple[dict[str, Any], dict[str, TripSpec]]
 
 @pytest.fixture
 def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
-    calls: dict[str, Any] = {"extract": 0, "search": [], "places": [], "concurrent": 0}
+    calls: dict[str, Any] = {
+        "extract": 0,
+        "search": [],
+        "places": [],
+        "prices": [],
+        "totals": TOTALS,
+        "concurrent": 0,
+    }
     spec = {"value": TripSpec(destination="Goa", interests=["beach"])}
 
     async def fake_extract(query: str) -> TripSpec:
         calls["extract"] += 1
         return spec["value"]
+
+    async def fake_prices(*args: Any) -> dict[str, list[int]]:
+        calls["prices"].append(args)
+        return {"totals": calls["totals"]}
 
     async def fake_search(**kwargs: Any) -> dict[str, Any]:
         calls["search"].append(kwargs)
@@ -55,7 +66,22 @@ def fakes(monkeypatch: pytest.MonkeyPatch) -> Fakes:
     monkeypatch.setattr(graph, "extract_trip", fake_extract)
     monkeypatch.setattr(graph, "search_stays", fake_search)
     monkeypatch.setattr(graph, "search_places", fake_places)
+    monkeypatch.setattr(graph, "fetch_stay_totals", fake_prices)
     return calls, spec
+
+
+async def answer_until_budget(thread_id: str) -> dict[str, Any]:
+    """Answer one question at a time until the form asks for the budget."""
+    run = {}
+    for name, value in ANSWERS.items():
+        run = await resume_trip(thread_id, {name: value})
+    return run
+
+
+async def finish_trip(thread_id: str) -> dict[str, Any]:
+    run = await answer_until_budget(thread_id)
+    choice = run["budget_options"][0]["value"]
+    return await resume_trip(thread_id, {"budget_total_inr": choice})
 
 
 def full_spec() -> TripSpec:
@@ -94,12 +120,76 @@ async def test_missing_fields_pause_the_graph(fakes: Fakes) -> None:
 async def test_resume_finishes_and_calls_llm_once(fakes: Fakes) -> None:
     calls, _ = fakes
     first = await start_trip("Goa trip")
-    run = await resume_trip(first["thread_id"], ANSWERS)
+    run = await finish_trip(first["thread_id"])
     assert run["status"] == "done"
     assert run["destination"] == "Goa"
     assert calls["extract"] == 1
     assert calls["search"][0]["adults"] == 2
     assert calls["places"] == [("Goa", ["beach"])]
+
+
+async def test_each_answer_moves_to_the_next_single_question(fakes: Fakes) -> None:
+    first = await start_trip("Goa trip")
+    thread_id = first["thread_id"]
+    run = await resume_trip(thread_id, {"check_in": CHECK_IN.isoformat()})
+    assert run["missing_fields"][0] == "check_out"
+    assert run["error"] is None
+    run = await resume_trip(thread_id, {"check_out": CHECK_OUT.isoformat()})
+    assert run["missing_fields"] == ["adults", "budget_total_inr"]
+    assert run["error"] is None
+
+
+async def test_answer_for_a_field_not_asked_is_ignored(fakes: Fakes) -> None:
+    first = await start_trip("Goa trip")
+    run = await resume_trip(
+        first["thread_id"],
+        {"check_in": CHECK_IN.isoformat(), "adults": "2", "budget_total_inr": "5"},
+    )
+    assert run["missing_fields"] == ["check_out", "adults", "budget_total_inr"]
+
+
+async def test_budget_options_use_duration_adults_and_location(fakes: Fakes) -> None:
+    calls, _ = fakes
+    first = await start_trip("Goa trip")
+    run = await answer_until_budget(first["thread_id"])
+    assert run["missing_fields"] == ["budget_total_inr"]
+    assert run["budget_live"] is True
+    assert run["budget_options"][0]["value"] == "20000"
+    assert calls["prices"] == [("Goa", CHECK_IN, CHECK_OUT, 2)]
+
+
+async def test_budget_uses_estimate_without_live_prices(fakes: Fakes) -> None:
+    calls, _ = fakes
+    calls["totals"] = []
+    first = await start_trip("Goa trip")
+    run = await answer_until_budget(first["thread_id"])
+    assert run["budget_live"] is False
+    # 1 room for 2 adults, 3 nights, ₹2,000 for each night.
+    assert run["budget_options"][0]["value"] == "6000"
+
+
+async def test_budget_not_offered_is_rejected_with_no_new_price_search(
+    fakes: Fakes,
+) -> None:
+    calls, _ = fakes
+    first = await start_trip("Goa trip")
+    await answer_until_budget(first["thread_id"])
+    run = await resume_trip(first["thread_id"], {"budget_total_inr": "1"})
+    assert run["missing_fields"] == ["budget_total_inr"]
+    assert run["error"] == "Please choose one of the budget options."
+    assert len(calls["prices"]) == 1
+    assert calls["search"] == []
+
+
+async def test_budget_in_the_message_skips_the_price_search(fakes: Fakes) -> None:
+    calls, spec = fakes
+    spec["value"] = TripSpec(destination="Goa", budget_total_inr=30000)
+    first = await start_trip("Goa trip")
+    for name, value in ANSWERS.items():
+        run = await resume_trip(first["thread_id"], {name: value})
+    assert run["status"] == "done"
+    assert calls["prices"] == []
+    assert calls["search"][0]["max_price_per_night"] == 10000
 
 
 async def test_searches_run_in_parallel(fakes: Fakes) -> None:
@@ -111,24 +201,19 @@ async def test_searches_run_in_parallel(fakes: Fakes) -> None:
 
 async def test_blank_answers_pause_again_with_message(fakes: Fakes) -> None:
     first = await start_trip("Goa trip")
-    run = await resume_trip(first["thread_id"], {"adults": "2"})
+    run = await resume_trip(first["thread_id"], {"check_in": " "})
     assert run["status"] == "needs_input"
-    assert "adults" not in run["missing_fields"]
-    assert run["error"] == "Please answer every question."
+    assert run["missing_fields"][0] == "check_in"
+    assert run["error"] == "Please answer this question."
 
 
 async def test_invalid_answers_pause_again_with_error(fakes: Fakes) -> None:
     first = await start_trip("Goa trip")
-    run = await resume_trip(
-        first["thread_id"],
-        {
-            **ANSWERS,
-            "check_in": CHECK_OUT.isoformat(),
-            "check_out": CHECK_IN.isoformat(),
-        },
-    )
+    thread_id = first["thread_id"]
+    await resume_trip(thread_id, {"check_in": CHECK_OUT.isoformat()})
+    run = await resume_trip(thread_id, {"check_out": CHECK_IN.isoformat()})
     assert run["status"] == "needs_input"
-    assert run["missing_fields"] == ["check_out"]
+    assert run["missing_fields"][0] == "check_out"
     assert "after the check-in" in run["error"]
 
 
@@ -167,7 +252,7 @@ async def test_events_cover_every_step_and_hide_the_query(fakes: Fakes) -> None:
     queue = hub.subscribe()
     try:
         first = await start_trip(SECRET_QUERY)
-        await resume_trip(first["thread_id"], ANSWERS)
+        await finish_trip(first["thread_id"])
     finally:
         hub.unsubscribe(queue)
     events = [queue.get_nowait() for _ in range(queue.qsize())]
@@ -219,6 +304,13 @@ def test_check_spec_rejects_past_date_and_bad_numbers() -> None:
     assert fields["destination"] == "Goa"
     assert missing == ["check_in", "adults", "budget_total_inr"]
     assert error is not None
+
+
+def test_check_spec_error_belongs_to_the_next_question() -> None:
+    spec = TripSpec(destination="Goa", check_in=CHECK_IN, adults=99)
+    _, missing, error = check_spec(spec, TODAY)
+    assert missing[0] == "check_out"
+    assert error is None
 
 
 def test_check_spec_limits_interests_and_does_not_require_them() -> None:

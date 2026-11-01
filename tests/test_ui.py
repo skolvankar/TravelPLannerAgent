@@ -16,6 +16,10 @@ LISTING = {
     "details": "1 bed",
 }
 PLACE = {"title": "Beach", "url": "https://x.test/p", "summary": "Sand"}
+OPTIONS = [
+    {"value": "7000", "label": "Economy: ₹7,000"},
+    {"value": "15000", "label": "Mid-range: ₹15,000"},
+]
 
 
 def results(source: str = SOURCE_LIVE, destination: str = "Goa") -> PrefabApp:
@@ -36,21 +40,39 @@ def nodes(app: PrefabApp) -> list[dict[str, Any]]:
     return found
 
 
-def test_form_has_controls_only_for_missing_fields() -> None:
-    types = {
-        n.get("name"): n["type"]
-        for n in nodes(build_form("t", ["budget_total_inr", "check_in"], None))
-    }
-    assert types["budget_total_inr"] == "RadioGroup"
-    assert types["check_in"] == "DatePicker"
-    assert "destination" not in types
-    assert "adults" not in types
+def button_of(app: PrefabApp) -> dict[str, Any]:
+    return next(n for n in nodes(app) if n["type"] == "Button")
 
 
-def test_budget_uses_radio_buttons_and_destination_uses_text() -> None:
-    all_nodes = nodes(build_form("t", ["budget_total_inr", "destination"], None))
-    radios = [n["option"] for n in all_nodes if n["type"] == "Radio"]
-    assert radios == ["10000", "25000", "50000", "100000"]
+def test_form_asks_only_the_first_missing_field() -> None:
+    all_nodes = nodes(build_form("t", ["check_in", "adults", "budget_total_inr"], None))
+    named = {n["name"]: n["type"] for n in all_nodes if n.get("name")}
+    assert named == {"check_in": "DatePicker"}
+
+
+def test_budget_radios_come_from_the_options() -> None:
+    app = build_form("t", ["budget_total_inr"], None, OPTIONS)
+    radios = [(n["option"], n["label"]) for n in nodes(app) if n["type"] == "Radio"]
+    assert radios == [
+        ("7000", "Economy: ₹7,000"),
+        ("15000", "Mid-range: ₹15,000"),
+    ]
+
+
+def test_estimated_budget_shows_a_note_and_live_budget_does_not() -> None:
+    estimated = build_form("t", ["budget_total_inr"], None, OPTIONS, False)
+    live = build_form("t", ["budget_total_inr"], None, OPTIONS, True)
+    assert "general estimates" in json.dumps(estimated.to_json())
+    assert "general estimates" not in json.dumps(live.to_json())
+
+
+def test_button_says_next_until_the_last_question() -> None:
+    assert button_of(build_form("t", ["check_in", "adults"], None))["label"] == "Next"
+    assert button_of(build_form("t", ["adults"], None))["label"] == "Search stays"
+
+
+def test_destination_uses_a_text_input() -> None:
+    all_nodes = nodes(build_form("t", ["destination"], None))
     assert any(n["type"] == "Input" and n["name"] == "destination" for n in all_nodes)
 
 
@@ -62,9 +84,7 @@ def test_adults_uses_a_number_input() -> None:
 
 
 def test_button_calls_submit_tool_with_state_templates() -> None:
-    button = next(
-        n for n in nodes(build_form("abc", ["adults"], None)) if n["type"] == "Button"
-    )
+    button = button_of(build_form("abc", ["adults", "budget_total_inr"], None))
     assert button["onClick"]["action"] == "toolCall"
     assert button["onClick"]["tool"] == "submit_trip_details"
     assert button["onClick"]["arguments"] == {
@@ -103,8 +123,8 @@ def test_views_use_only_components_that_the_page_draws() -> None:
     # drawRadioGroup draws Radio children.
     drawn.add("Radio")
     fields = ["destination", "check_in", "check_out", "adults", "budget_total_inr"]
-    views = (build_form("t", fields, "e"), results(), build_error("C", "d"))
-    for app in views:
+    forms = [build_form("t", fields[i:], "e", OPTIONS) for i in range(len(fields))]
+    for app in (*forms, results(), build_error("C", "d")):
         assert {n["type"] for n in nodes(app)} <= drawn
 
 

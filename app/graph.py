@@ -16,7 +16,8 @@ from langgraph.types import Command, interrupt
 from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 
-from app.airbnb import search_stays
+from app.airbnb import fetch_stay_totals, search_stays
+from app.budget import build_budget_options
 from app.config import (
     LLM_EFFORT,
     LLM_MAX_TOKENS,
@@ -31,12 +32,15 @@ from app.tavily import search_places
 
 MAX_ADULTS = 16
 MAX_DESTINATION_CHARS = 100
+BUDGET_FIELD = "budget_total_inr"
+# The order of the questions. The budget stays last, because its options need the
+# other fields.
 REQUIRED_FIELDS = (
     "destination",
     "check_in",
     "check_out",
     "adults",
-    "budget_total_inr",
+    BUDGET_FIELD,
 )
 
 EXTRACTION_PROMPT = """You extract trip details from a customer message.
@@ -69,6 +73,8 @@ class TripState(TypedDict, total=False):
     extracted: bool
     missing_fields: list[str]
     field_error: str | None
+    budget_options: list[dict[str, str]]
+    budget_live: bool
     stay_candidates: list[dict[str, Any]]
     stay_source: str
     places: list[dict[str, str]]
@@ -119,34 +125,37 @@ async def extract_trip(query: str) -> TripSpec:
 def check_spec(
     spec: TripSpec, today: date
 ) -> tuple[dict[str, Any], list[str], str | None]:
-    """Clear invalid values. Return the clean fields, missing fields, and first error."""
+    """Clear invalid values. Return the clean fields, missing fields, and an error.
+
+    The error belongs to the first missing field, which is the next question.
+    """
     fields = spec.model_dump()
-    errors: list[str] = []
+    errors: dict[str, str] = {}
     if fields["destination"]:
         fields["destination"] = fields["destination"].strip()[:MAX_DESTINATION_CHARS]
     if fields["adults"] is not None and not 1 <= fields["adults"] <= MAX_ADULTS:
         fields["adults"] = None
-        errors.append(f"Adults must be from 1 to {MAX_ADULTS}.")
-    if fields["budget_total_inr"] is not None and fields["budget_total_inr"] <= 0:
-        fields["budget_total_inr"] = None
-        errors.append("The budget must be more than zero.")
+        errors["adults"] = f"Adults must be from 1 to {MAX_ADULTS}."
+    if fields[BUDGET_FIELD] is not None and fields[BUDGET_FIELD] <= 0:
+        fields[BUDGET_FIELD] = None
+        errors[BUDGET_FIELD] = "The budget must be more than zero."
     if fields["check_in"] and fields["check_in"] < today:
         fields["check_in"] = None
-        errors.append("The check-in date cannot be in the past.")
+        errors["check_in"] = "The check-in date cannot be in the past."
     if (
         fields["check_in"]
         and fields["check_out"]
         and fields["check_out"] <= fields["check_in"]
     ):
         fields["check_out"] = None
-        errors.append("The check-out date must be after the check-in date.")
+        errors["check_out"] = "The check-out date must be after the check-in date."
     fields["interests"] = [
         interest.strip()[:MAX_INTEREST_CHARS]
         for interest in (fields["interests"] or [])[:MAX_INTERESTS]
         if interest.strip()
     ]
     missing = [name for name in REQUIRED_FIELDS if not fields[name]]
-    return fields, missing, errors[0] if errors else None
+    return fields, missing, errors.get(missing[0]) if missing else None
 
 
 def parse_answers(answers: dict[str, str | None]) -> tuple[dict[str, Any], str | None]:
@@ -158,7 +167,7 @@ def parse_answers(answers: dict[str, str | None]) -> tuple[dict[str, Any], str |
         "check_in": date.fromisoformat,
         "check_out": date.fromisoformat,
         "adults": int,
-        "budget_total_inr": int,
+        BUDGET_FIELD: int,
     }
     for name, convert in converters.items():
         raw = (answers.get(name) or "").strip()
@@ -172,8 +181,41 @@ def parse_answers(answers: dict[str, str | None]) -> tuple[dict[str, Any], str |
     return parsed, first_error
 
 
+async def _budget_update(
+    state: TripState, fields: dict[str, Any], missing: list[str]
+) -> dict[str, Any]:
+    """Build the budget options once, when the budget is the next question."""
+    if not missing or missing[0] != BUDGET_FIELD or state.get("budget_options"):
+        return {}
+    prices = await _traced_call(
+        get_stream_writer(),
+        "airbnb",
+        "airbnb_search",
+        fetch_stay_totals(
+            fields["destination"],
+            fields["check_in"],
+            fields["check_out"],
+            fields["adults"],
+        ),
+        _describe_prices,
+    )
+    nights = (fields["check_out"] - fields["check_in"]).days
+    options, live = build_budget_options(prices["totals"], nights, fields["adults"])
+    logger.debug(f"ACTION: intake.budget | options={len(options)} | live={live}")
+    return {"budget_options": options, "budget_live": live}
+
+
+def _chosen_budget_error(state: TripState, parsed: dict[str, Any]) -> str | None:
+    """Remove a budget that the form did not offer, and return the error."""
+    offered = {option["value"] for option in state.get("budget_options") or []}
+    if BUDGET_FIELD in parsed and str(parsed[BUDGET_FIELD]) not in offered:
+        del parsed[BUDGET_FIELD]
+        return "Please choose one of the budget options."
+    return None
+
+
 async def intake(state: TripState) -> dict[str, Any]:
-    """Extract once. On later passes, pause for the missing fields and merge answers."""
+    """Extract once. On later passes, ask one missing field and merge the answer."""
     today = date.today()
     if not state.get("extracted"):
         spec = await extract_trip(state["query"])
@@ -184,22 +226,31 @@ async def intake(state: TripState) -> dict[str, Any]:
             "extracted": True,
             "missing_fields": missing,
             "field_error": error,
+            **await _budget_update(state, fields, missing),
         }
 
-    # A resume runs this node again from the top, so the LLM call stays in the
-    # first pass and only this pause repeats.
+    # A resume runs this node again from the top, so the LLM call and the price
+    # search stay in earlier passes and only this pause repeats.
     answers = interrupt(
-        {"missing_fields": state["missing_fields"], "error": state.get("field_error")}
+        {
+            "missing_fields": state["missing_fields"],
+            "error": state.get("field_error"),
+            "budget_options": state.get("budget_options") or [],
+            "budget_live": state.get("budget_live", False),
+        }
     )
-    parsed, parse_error = parse_answers(answers)
+    asked = state["missing_fields"][0]
+    parsed, parse_error = parse_answers({asked: answers.get(asked)})
+    budget_error = _chosen_budget_error(state, parsed)
     current = {name: state.get(name) for name in TripSpec.model_fields}
     fields, missing, error = check_spec(TripSpec(**{**current, **parsed}), today)
-    logger.debug(f"ACTION: intake.merge | missing_fields={missing}")
-    blank_error = "Please answer every question." if missing else None
+    logger.debug(f"ACTION: intake.merge | asked={asked} | missing_fields={missing}")
+    blank_error = "Please answer this question." if asked in missing else None
     return {
         **fields,
         "missing_fields": missing,
-        "field_error": parse_error or error or blank_error,
+        "field_error": parse_error or budget_error or error or blank_error,
+        **await _budget_update(state, fields, missing),
     }
 
 
@@ -224,6 +275,10 @@ async def _traced_call(
         }
     )
     return result
+
+
+def _describe_prices(result: dict[str, Any]) -> str:
+    return f"{len(result['totals'])} prices for the budget options"
 
 
 def _describe_stays(result: dict[str, Any]) -> str:

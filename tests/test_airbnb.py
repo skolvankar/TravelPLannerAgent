@@ -44,6 +44,54 @@ def test_parse_search_limits_listings() -> None:
     assert len(airbnb.parse_search({"searchResults": [RAW] * 9})) == airbnb.MAX_LISTINGS
 
 
+@pytest.mark.parametrize(
+    ("label", "total"),
+    [
+        ("₹12,000 for 3 nights", 12000),
+        ("₹13,894 for 3 nights, originally ₹15,393", 13894),
+        ("₹4,100 for 1 night", 4100),
+        ("$120 for 3 nights", None),
+        ("₹0 for 3 nights", None),
+        ("Price not shown", None),
+        (None, None),
+    ],
+)
+def test_parse_stay_total_reads_rupee_totals(label: Any, total: int | None) -> None:
+    raw = {"structuredDisplayPrice": {"primaryLine": {"accessibilityLabel": label}}}
+    assert airbnb.parse_stay_total(raw) == total
+
+
+async def test_fetch_totals_has_no_price_limit_or_listing_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sent: dict[str, Any] = {}
+
+    async def fake_call(arguments: dict[str, Any]) -> dict[str, Any]:
+        sent.update(arguments)
+        return {"searchResults": [RAW] * 9 + [{"id": "no-price"}]}
+
+    monkeypatch.setattr(airbnb, "call_airbnb", fake_call)
+    result = await airbnb.fetch_stay_totals(
+        "Goa", date(2026, 12, 10), date(2026, 12, 13), 2
+    )
+    assert result == {"totals": [12000] * 9}
+    assert "maxPrice" not in sent
+    assert sent["adults"] == 2
+
+
+async def test_fetch_totals_failure_returns_no_sample_prices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def fake_call(arguments: dict[str, Any]) -> dict[str, Any]:
+        return {"error": "Failed to parse"}
+
+    monkeypatch.setattr(airbnb, "call_airbnb", fake_call)
+    result = await airbnb.fetch_stay_totals(
+        "Pune", date(2026, 12, 10), date(2026, 12, 13), 2
+    )
+    assert result == {"totals": []}
+
+
 async def test_search_sends_mcp_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
     sent: dict[str, Any] = {}
 
