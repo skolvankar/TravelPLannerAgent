@@ -17,6 +17,7 @@ from loguru import logger
 from pydantic import BaseModel, Field, ValidationError
 
 from app.airbnb import search_stays
+from app.budget import budget_options
 from app.config import (
     LLM_EFFORT,
     LLM_MAX_TOKENS,
@@ -172,6 +173,13 @@ def parse_answers(answers: dict[str, str | None]) -> tuple[dict[str, Any], str |
     return parsed, first_error
 
 
+def _budget_options_for(state: TripState, field: str) -> list[tuple[str, str]]:
+    if field != "budget_total_inr":
+        return []
+    nights = (state["check_out"] - state["check_in"]).days
+    return budget_options(state["destination"], nights, state["adults"])
+
+
 async def intake(state: TripState) -> dict[str, Any]:
     """Extract once. On later passes, pause for the missing fields and merge answers."""
     today = date.today()
@@ -188,14 +196,23 @@ async def intake(state: TripState) -> dict[str, Any]:
 
     # A resume runs this node again from the top, so the LLM call stays in the
     # first pass and only this pause repeats.
+    # Ask one field at a time. REQUIRED_FIELDS puts the budget last, so its
+    # options can use the place, the dates, and the adults.
+    field = state["missing_fields"][0]
     answers = interrupt(
-        {"missing_fields": state["missing_fields"], "error": state.get("field_error")}
+        {
+            "missing_fields": state["missing_fields"],
+            "field": field,
+            "remaining": len(state["missing_fields"]) - 1,
+            "budget_options": _budget_options_for(state, field),
+            "error": state.get("field_error"),
+        }
     )
-    parsed, parse_error = parse_answers(answers)
+    parsed, parse_error = parse_answers({field: answers.get(field)})
     current = {name: state.get(name) for name in TripSpec.model_fields}
     fields, missing, error = check_spec(TripSpec(**{**current, **parsed}), today)
-    logger.debug(f"ACTION: intake.merge | missing_fields={missing}")
-    blank_error = "Please answer every question." if missing else None
+    logger.debug(f"ACTION: intake.merge | field={field} | missing_fields={missing}")
+    blank_error = "Please answer this question." if field not in parsed else None
     return {
         **fields,
         "missing_fields": missing,
@@ -336,6 +353,7 @@ async def _stream_run(
                         "kind": "paused",
                         "node": chunk["name"],
                         "missing_fields": pause["missing_fields"],
+                        "field": pause["field"],
                         "error": pause["error"],
                     }
                 )
