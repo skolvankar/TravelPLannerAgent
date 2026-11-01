@@ -30,3 +30,15 @@ MAX_PLACE_TEXT_CHARS = 300
 MAX_INTERESTS = 5
 MAX_INTEREST_CHARS = 40
 PAUSED_TRIP_TTL_SECONDS = 3600
+
+# Budget options. Each tier has a percentile of live stay totals, and a nightly room
+# rate in rupees for the formula that runs when live prices are not available.
+BUDGET_TIERS = (
+    ("Economy", 25, 2000),
+    ("Mid-range", 50, 4000),
+    ("Comfort", 75, 8000),
+    ("Premium", 90, 15000),
+)
+BUDGET_MIN_PRICES = 4
+BUDGET_ROUND_INR = 500
+ADULTS_PER_ROOM = 2

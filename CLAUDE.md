@@ -23,7 +23,8 @@ Browser page (app/static)
               └─► Tavily MCP over HTTP (remote server)
 ```
 
-- `intake` calls the LLM once. It then loops to itself and pauses with `interrupt()` until no required field is missing.
+- `intake` calls the LLM once. It then loops to itself and pauses with `interrupt()` until no required field is missing. Each pause asks only the first missing field, and the server ignores answers for other fields.
+- The budget is the last question. Before that pause, `intake` searches Airbnb with no price limit and `app/budget.py` builds the options from the stay totals. A resume runs the node from the top, so this search runs in an earlier pass and does not repeat.
 - `process` uses no LLM. It calls Airbnb and Tavily in parallel.
 - `mcp_client.json` holds all MCP servers. It uses `${NAME}` for secrets, never values. `app/mcp_client.py` expands the names and opens one client for each server. FastMCP does not expand `${NAME}` itself.
 - `app/ui.py` builds Prefab components. The tools return them as JSON in `structuredContent`.
@@ -43,6 +44,8 @@ Browser page (app/static)
 | PRD domain allow list | Not included | Minimal scope. Each result shows its source link |
 | PRD scope | Two nodes only. No Laya, supervisor, Trip Rules, or planner | User-approved minimal scope |
 | Sample data location | `app/fixtures/`, not `data/` or `tests/` | `data/` is protected, and the application reads this file at runtime |
+| Budget options | The 25th, 50th, 75th, and 90th percentiles of live Airbnb stay totals, rounded up to ₹500. The form offers only these values | The user chose live prices over an LLM estimate or a city table |
+| Budget fallback | `rooms × nightly rate × nights`, with a page note, when the search fails or returns fewer than 4 prices. The recorded Goa listings are never used | Those prices are wrong for other destinations |
 | Playwright | The `playwright` package directly, not the `pytest-playwright` plugin | The plugin keeps an event loop open, which breaks the async tests that run after it |
 
 ## Vendored code
@@ -58,6 +61,20 @@ Browser page (app/static)
 4. The sample listings are from Goa on 2026-11-01. They are not results for the search of the user, and the page says so.
 5. Every open tab receives the events of every trip. This is acceptable for a local single-user demo, but not for a shared server.
 6. Tavily results come from any website. The text is shown as plain text, and no LLM reads it. Adding an LLM step needs a prompt injection review.
+7. Budget options can change between two identical searches, because Airbnb returns a different set of 18 listings. On 2026-11-01, the Mid-range value for one Jaipur search was ₹13,000 and then ₹16,500.
+8. The nightly rates of the budget fallback in `app/config.py` (₹2,000 to ₹15,000) are starting values, not market data. The fallback does not use the location, and the page says so.
+9. A trip that asks for the budget makes two Airbnb searches. The budget question takes about 7 seconds to appear.
+
+## Open code review findings (third review, one-at-a-time and budget options, 2026-11-01, not fixed, the user chose to commit)
+
+1. `app/graph.py`: `check_spec` keeps only the error of the first missing field, so an invalid value from the customer message can disappear with no explanation.
+2. `app/graph.py`: `_budget_update` never rebuilds the options, so a date that is cleared and answered again can leave stale options.
+3. `app/airbnb.py`: `STAY_TOTAL` is not verified against a real one-night label. A different label makes one-night trips use the estimate.
+4. `app/airbnb.py`: one malformed price label raises `ValueError`, which discards all live prices for that search.
+5. `app/graph.py`: the extraction prompt says "whole-trip" budget, but the form says "whole stay" and the code treats both as a stay budget.
+6. `app/airbnb.py`: trips that ask for the budget run two full Airbnb searches.
+7. `app/ui.py`: `build_form` defaults to `budget_live=True` and no options, and only tests use those defaults.
+8. `app/ui.py`: the form logic repeats the literal `budget_total_inr` instead of one shared name.
 
 ## Open code review findings (second review, 2026-11-01, not fixed, waiting for user approval)
 

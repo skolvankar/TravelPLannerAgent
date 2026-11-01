@@ -19,22 +19,21 @@ from prefab_ui.components import (
 
 from app.airbnb import SOURCE_SAMPLE
 
-BUDGET_OPTIONS = [
-    ("10000", "₹10,000"),
-    ("25000", "₹25,000"),
-    ("50000", "₹50,000"),
-    ("100000", "₹1,00,000"),
-]
+ESTIMATE_NOTE = (
+    "Live prices for this destination are not available. "
+    "These are general estimates."
+)
 
 
-def _radio_field(name: str, title: str, options: list[tuple[str, str]]) -> None:
+def _radio_field(name: str, title: str, options: list[dict[str, str]]) -> None:
     Label(title, id=f"{name}-label")
     with RadioGroup(name=name, aria_labelledby=f"{name}-label"):
-        for value, label in options:
-            Radio(option=value, label=label, id=f"{name}-{value}")
+        for option in options:
+            value = option["value"]
+            Radio(option=value, label=option["label"], id=f"{name}-{value}")
 
 
-def _draw_field(name: str) -> None:
+def _draw_field(name: str, budget_options: list[dict[str, str]]) -> None:
     if name == "destination":
         Label("Destination", id="destination-label")
         Input(name="destination", placeholder="Goa", id="destination")
@@ -48,24 +47,29 @@ def _draw_field(name: str) -> None:
         Label("Number of adults", id="adults-label")
         Input(name="adults", input_type="number", placeholder="2", id="adults")
     elif name == "budget_total_inr":
-        _radio_field("budget_total_inr", "Budget for the whole trip", BUDGET_OPTIONS)
+        _radio_field("budget_total_inr", "Budget for the whole stay", budget_options)
 
 
 def build_form(
-    thread_id: str, missing_fields: list[str], error: str | None
+    thread_id: str,
+    missing_fields: list[str],
+    error: str | None,
+    budget_options: list[dict[str, str]] | None = None,
+    budget_live: bool = True,
 ) -> PrefabApp:
-    """Build a form with one control for each missing field."""
-    arguments = {"thread_id": thread_id}
-    arguments.update({name: f"{{{{ {name} }}}}" for name in missing_fields})
-    state = {name: "" for name in missing_fields}
-    with PrefabApp(state=state) as app, Column(gap=3):
-        H3("We need a few more details")
+    """Build a form that asks only the first missing field."""
+    field = missing_fields[0]
+    last_question = len(missing_fields) == 1
+    arguments = {"thread_id": thread_id, field: f"{{{{ {field} }}}}"}
+    with PrefabApp(state={field: ""}) as app, Column(gap=3):
+        H3("We need one more detail" if last_question else "We need a few more details")
         if error:
             Text(error, css_class="error")
-        for name in missing_fields:
-            _draw_field(name)
+        if field == "budget_total_inr" and not budget_live:
+            Text(ESTIMATE_NOTE)
+        _draw_field(field, budget_options or [])
         Button(
-            "Search stays",
+            "Search stays" if last_question else "Next",
             on_click=CallTool("submit_trip_details", arguments=arguments),
         )
     return app
